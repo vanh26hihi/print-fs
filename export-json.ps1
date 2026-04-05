@@ -41,43 +41,43 @@ function Close-SQLiteConnection {
 }
 
 function Show-LoginForm {
-    $correctPasswords = @("funstud!o", "kien", "quoc", "vanh")
+    $correctPasswords = @("funstud!o", "kien", "chien", "vanh")
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Login"
-    $form.Size = New-Object System.Drawing.Size(400, 220)
-    $form.StartPosition = "CenterScreen"
-    $form.TopMost = $true
-    $form.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Regular)
+    $loginForm = New-Object System.Windows.Forms.Form
+    $loginForm.Text = "Login"
+    $loginForm.Size = New-Object System.Drawing.Size(400, 220)
+    $loginForm.StartPosition = "CenterScreen"
+    $loginForm.TopMost = $true
+    $loginForm.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Regular)
 
     $label = New-Object System.Windows.Forms.Label
     $label.Text = "Enter password:"
     $label.Location = New-Object System.Drawing.Point(20, 20)
     $label.Size = New-Object System.Drawing.Size(350, 30)
-    $form.Controls.Add($label)
+    $loginForm.Controls.Add($label)
 
     $textbox = New-Object System.Windows.Forms.TextBox
     $textbox.Location = New-Object System.Drawing.Point(20, 60)
     $textbox.Size = New-Object System.Drawing.Size(340, 30)
     $textbox.UseSystemPasswordChar = $true
-    $form.Controls.Add($textbox)
+    $loginForm.Controls.Add($textbox)
 
     $okButton = New-Object System.Windows.Forms.Button
     $okButton.Text = "OK"
     $okButton.Location = New-Object System.Drawing.Point(70, 110)
     $okButton.Size = New-Object System.Drawing.Size(100, 40)
-    $form.Controls.Add($okButton)
+    $loginForm.Controls.Add($okButton)
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = "Exit"
     $cancelButton.Location = New-Object System.Drawing.Point(200, 110)
     $cancelButton.Size = New-Object System.Drawing.Size(100, 40)
-    $form.Controls.Add($cancelButton)
+    $loginForm.Controls.Add($cancelButton)
 
     $okButton.Add_Click({
         if ($correctPasswords -contains $textbox.Text) {
-            $form.Tag = $true
-            $form.Close()
+            $loginForm.Tag = $true
+            $loginForm.Close()
         } else {
             [System.Windows.Forms.MessageBox]::Show("Wrong password!", "Error")
             $textbox.Clear()
@@ -85,18 +85,17 @@ function Show-LoginForm {
     })
 
     $cancelButton.Add_Click({
-        $form.Tag = $false
-        $form.Close()
+        $loginForm.Tag = $false
+        $loginForm.Close()
     })
 
-    $form.AcceptButton = $okButton
-    $form.CancelButton = $cancelButton
+    $loginForm.AcceptButton = $okButton
+    $loginForm.CancelButton = $cancelButton
 
-    [void]$form.ShowDialog()
-    return $form.Tag -eq $true
+    [void]$loginForm.ShowDialog()
+    return $loginForm.Tag -eq $true
 }
 
-# Gọi API in lại
 function Send-ToPrintAPI {
     param (
         [string]$transactionId,
@@ -147,50 +146,64 @@ function Show-ImagePopup {
     [void]$imgForm.ShowDialog()
 }
 
+function Get-TransactionJson {
+    param(
+        [string]$transactionId
+    )
+
+    $cmd = $global:SQLiteConnection.CreateCommand()
+    $cmd.CommandText = "SELECT * FROM Transactions WHERE Id = @id LIMIT 1"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
+
+    $reader = $cmd.ExecuteReader()
+
+    if (-not $reader.Read()) {
+        $reader.Close()
+        return $null
+    }
+
+    $result = [ordered]@{}
+
+    for ($i = 0; $i -lt $reader.FieldCount; $i++) {
+        $name = $reader.GetName($i)
+        $value = $reader.GetValue($i)
+
+        if ($value -eq [DBNull]::Value) {
+            $result[$name] = $null
+            continue
+        }
+
+        if ($name -eq "Images" -or $name -eq "LayoutParameters") {
+            try {
+                $result[$name] = $value.ToString() | ConvertFrom-Json
+            } catch {
+                $result[$name] = $value.ToString()
+            }
+        }
+        else {
+            $result[$name] = $value
+        }
+    }
+
+    $reader.Close()
+
+    return ($result | ConvertTo-Json -Depth 20)
+}
+
 function Export-TransactionJson {
     param(
         [string]$transactionId
     )
 
     try {
-        $cmd = $global:SQLiteConnection.CreateCommand()
-        $cmd.CommandText = "SELECT * FROM Transactions WHERE Id = @id LIMIT 1"
-        $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
+        $json = Get-TransactionJson -transactionId $transactionId
 
-        $reader = $cmd.ExecuteReader()
-
-        if (-not $reader.Read()) {
-            $reader.Close()
+        if (-not $json) {
             [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction!", "Error")
             return
         }
 
-        $result = [ordered]@{}
-
-        for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-            $name = $reader.GetName($i)
-            $value = $reader.GetValue($i)
-
-            if ($value -eq [DBNull]::Value) {
-                $result[$name] = $null
-                continue
-            }
-
-            if ($name -eq "Images" -or $name -eq "LayoutParameters") {
-                try {
-                    $result[$name] = $value.ToString() | ConvertFrom-Json
-                } catch {
-                    $result[$name] = $value.ToString()
-                }
-            }
-            else {
-                $result[$name] = $value
-            }
-        }
-
-        $reader.Close()
-
-        $json = $result | ConvertTo-Json -Depth 20
+        $txtJson.Text = $json
 
         $saveDialog = New-Object System.Windows.Forms.SaveFileDialog
         $saveDialog.Filter = "JSON files (*.json)|*.json"
@@ -206,7 +219,6 @@ function Export-TransactionJson {
     }
 }
 
-# Load danh sách giao dịch từ DB
 function Load-Transactions {
     param (
         [string]$searchText = "",
@@ -244,7 +256,6 @@ function Load-Transactions {
     $reader.Close()
 }
 
-# Load danh sách LayoutId duy nhất
 function Load-LayoutFilter {
     $cboLayoutFilter.Items.Clear()
     $cboLayoutFilter.Items.Add("<All>")
@@ -266,17 +277,17 @@ function Load-LayoutFilter {
 # =========================
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Transactions Viewer"
-$form.Size = New-Object System.Drawing.Size(980, 650)
+$form.Size = New-Object System.Drawing.Size(1000, 780)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Regular)
 
 $listView = New-Object System.Windows.Forms.ListView
 $listView.Location = New-Object System.Drawing.Point(20, 20)
-$listView.Size = New-Object System.Drawing.Size(920, 400)
+$listView.Size = New-Object System.Drawing.Size(940, 400)
 $listView.View = [System.Windows.Forms.View]::Details
 $listView.FullRowSelect = $true
 $listView.GridLines = $true
-$listView.Columns.Add("TransactionId", 380)
+$listView.Columns.Add("TransactionId", 390)
 $listView.Columns.Add("Date", 220)
 $listView.Columns.Add("LayoutId", 120)
 $form.Controls.Add($listView)
@@ -299,7 +310,6 @@ $btnPrintNow.Location = New-Object System.Drawing.Point(430, 480)
 $btnPrintNow.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnPrintNow)
 
-# Search TransactionId
 $txtSearch = New-Object System.Windows.Forms.TextBox
 $txtSearch.Location = New-Object System.Drawing.Point(20, 530)
 $txtSearch.Size = New-Object System.Drawing.Size(300, 30)
@@ -311,28 +321,39 @@ $btnSearch.Location = New-Object System.Drawing.Point(340, 530)
 $btnSearch.Size = New-Object System.Drawing.Size(100, 35)
 $form.Controls.Add($btnSearch)
 
-# Filter LayoutId
 $cboLayoutFilter = New-Object System.Windows.Forms.ComboBox
 $cboLayoutFilter.Location = New-Object System.Drawing.Point(460, 530)
 $cboLayoutFilter.Size = New-Object System.Drawing.Size(200, 30)
 $cboLayoutFilter.DropDownStyle = "DropDownList"
 $form.Controls.Add($cboLayoutFilter)
 
-# Nút View Image
 $btnViewImage = New-Object System.Windows.Forms.Button
 $btnViewImage.Text = "View Image"
 $btnViewImage.Location = New-Object System.Drawing.Point(570, 480)
 $btnViewImage.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnViewImage)
 
-# Nút Export JSON
 $btnExportJson = New-Object System.Windows.Forms.Button
 $btnExportJson.Text = "Export JSON"
 $btnExportJson.Location = New-Object System.Drawing.Point(710, 480)
 $btnExportJson.Size = New-Object System.Drawing.Size(130, 40)
 $form.Controls.Add($btnExportJson)
 
-# Event View Image
+$btnCopyJson = New-Object System.Windows.Forms.Button
+$btnCopyJson.Text = "Copy JSON"
+$btnCopyJson.Location = New-Object System.Drawing.Point(850, 480)
+$btnCopyJson.Size = New-Object System.Drawing.Size(110, 40)
+$form.Controls.Add($btnCopyJson)
+
+$txtJson = New-Object System.Windows.Forms.TextBox
+$txtJson.Location = New-Object System.Drawing.Point(20, 580)
+$txtJson.Size = New-Object System.Drawing.Size(940, 150)
+$txtJson.Multiline = $true
+$txtJson.ScrollBars = "Both"
+$txtJson.WordWrap = $false
+$txtJson.Font = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Regular)
+$form.Controls.Add($txtJson)
+
 $btnViewImage.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Please select a transaction first!", "Missing data")
@@ -343,7 +364,6 @@ $btnViewImage.Add_Click({
     Show-ImagePopup -transactionId $transactionId
 })
 
-# Event Print
 $btnPrintNow.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Please select a transaction!", "Missing data")
@@ -362,7 +382,6 @@ $btnPrintNow.Add_Click({
     Send-ToPrintAPI -transactionId $transactionId -layoutId $layoutId -numberOfImage $num
 })
 
-# Event Export JSON
 $btnExportJson.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
@@ -373,7 +392,25 @@ $btnExportJson.Add_Click({
     Export-TransactionJson -transactionId $transactionId
 })
 
-# Event chọn item
+$btnCopyJson.Add_Click({
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        return
+    }
+
+    $transactionId = $listView.SelectedItems[0].Text
+    $json = Get-TransactionJson -transactionId $transactionId
+
+    if (-not $json) {
+        [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction!", "Error")
+        return
+    }
+
+    $txtJson.Text = $json
+    [System.Windows.Forms.Clipboard]::SetText($json)
+    [System.Windows.Forms.MessageBox]::Show("✅ Đã copy JSON!", "Success")
+})
+
 $listView.Add_SelectedIndexChanged({
     if ($listView.SelectedItems.Count -gt 0) {
         $selected = $listView.SelectedItems[0]
@@ -381,12 +418,10 @@ $listView.Add_SelectedIndexChanged({
     }
 })
 
-# Event Search button
 $btnSearch.Add_Click({
     Load-Transactions -searchText $txtSearch.Text.Trim() -layoutFilter $cboLayoutFilter.SelectedItem
 })
 
-# Enter để search luôn
 $txtSearch.Add_KeyDown({
     param($sender, $e)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
@@ -394,12 +429,10 @@ $txtSearch.Add_KeyDown({
     }
 })
 
-# Event filter layout
 $cboLayoutFilter.Add_SelectedIndexChanged({
     Load-Transactions -searchText $txtSearch.Text.Trim() -layoutFilter $cboLayoutFilter.SelectedItem
 })
 
-# Chạy chương trình
 if (Show-LoginForm) {
     Open-SQLiteConnection
     Load-Transactions
