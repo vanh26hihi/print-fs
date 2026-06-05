@@ -141,7 +141,7 @@ function Write-ProcessVideoLog {
 function Send-ToProcessVideoAPI {
     param (
         [string]$transactionId,
-        [string]$apiUrl = "http://localhost:8088/api/File/ProcessVideo"
+        [string]$apiUrl = "http://localhost:8088/api/file/processvideo"
     )
 
     try {
@@ -152,42 +152,99 @@ function Send-ToProcessVideoAPI {
             return
         }
 
-        $txtJson.Text = "===== REQUEST ProcessVideo =====`r`n$json`r`n`r`nĐang gửi API: $apiUrl ..."
-        Write-ProcessVideoLog "REQUEST transactionId=$transactionId url=$apiUrl body=$json"
+        $txtJson.Text = @"
+===== REQUEST URL =====
+$apiUrl
 
-        $response = Invoke-WebRequest -Uri $apiUrl -Method POST -Body $json -ContentType "application/json" -UseBasicParsing
-        $responseText = $response.Content
+===== REQUEST BODY =====
+$json
 
-        if ([string]::IsNullOrWhiteSpace($responseText)) {
-            $responseText = "HTTP $($response.StatusCode) $($response.StatusDescription) - Empty response"
+Đang gửi API...
+"@
+
+        Write-ProcessVideoLog "REQUEST_URL=$apiUrl"
+        Write-ProcessVideoLog "REQUEST_BODY=$json"
+
+        $response = Invoke-WebRequest `
+            -Uri $apiUrl `
+            -Method POST `
+            -Body $json `
+            -ContentType "application/json" `
+            -UseBasicParsing
+
+        $responseCode = [int]$response.StatusCode
+        $responseBody = $response.Content
+
+        if ([string]::IsNullOrWhiteSpace($responseBody)) {
+            $responseBody = "Empty response"
         }
 
-        $logText = "===== REQUEST ProcessVideo =====`r`n$json`r`n`r`n===== RESPONSE ProcessVideo =====`r`n$responseText"
-        $txtJson.Text = $logText
-        Write-ProcessVideoLog "RESPONSE transactionId=$transactionId status=$($response.StatusCode) body=$responseText"
+        $logText = @"
+===== REQUEST URL =====
+$apiUrl
 
-        [System.Windows.Forms.MessageBox]::Show("✅ ProcessVideo thành công!`nHTTP $($response.StatusCode)`nLog: D:\Work\PhotoBooth\Logs\process-video-api.log", "Success")
-    } catch {
-        $errorText = $_.Exception.Message
+===== REQUEST BODY =====
+$json
+
+===== RESPONSE CODE =====
+$responseCode
+
+===== RESPONSE BODY =====
+$responseBody
+"@
+
+        $txtJson.Text = $logText
+
+        Write-ProcessVideoLog "RESPONSE_CODE=$responseCode"
+        Write-ProcessVideoLog "RESPONSE_BODY=$responseBody"
+
+        [System.Windows.Forms.MessageBox]::Show("✅ ProcessVideo thành công!`nResponse Code: $responseCode", "Success")
+    }
+    catch {
+        $responseCode = "Unknown"
+        $responseBody = $_.Exception.Message
 
         try {
             if ($_.Exception.Response -ne $null) {
+                $responseCode = [int]$_.Exception.Response.StatusCode
+
                 $stream = $_.Exception.Response.GetResponseStream()
                 if ($stream -ne $null) {
                     $reader = New-Object System.IO.StreamReader($stream)
                     $body = $reader.ReadToEnd()
+
                     if (-not [string]::IsNullOrWhiteSpace($body)) {
-                        $errorText = "$errorText`r`n$body"
+                        $responseBody = $body
                     }
+
+                    $reader.Close()
                 }
             }
         } catch {
-            # Bỏ qua lỗi đọc response body
+            # Nếu đọc response lỗi thì giữ message gốc
         }
 
-        $txtJson.Text = "===== PROCESS VIDEO ERROR =====`r`n$errorText"
-        Write-ProcessVideoLog "ERROR transactionId=$transactionId error=$errorText"
-        [System.Windows.Forms.MessageBox]::Show("❌ ProcessVideo lỗi:`n$errorText", "Error")
+        $logText = @"
+===== REQUEST URL =====
+$apiUrl
+
+===== REQUEST BODY =====
+$json
+
+===== RESPONSE CODE =====
+$responseCode
+
+===== RESPONSE BODY =====
+$responseBody
+"@
+
+        $txtJson.Text = $logText
+
+        Write-ProcessVideoLog "ERROR_REQUEST_URL=$apiUrl"
+        Write-ProcessVideoLog "ERROR_RESPONSE_CODE=$responseCode"
+        Write-ProcessVideoLog "ERROR_RESPONSE_BODY=$responseBody"
+
+        [System.Windows.Forms.MessageBox]::Show("❌ ProcessVideo lỗi!`nResponse Code: $responseCode`n$responseBody", "Error")
     }
 }
 
