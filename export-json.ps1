@@ -41,7 +41,7 @@ function Close-SQLiteConnection {
 }
 
 function Show-LoginForm {
-    $correctPasswords = @("funstud!o", "kien", "chien", "vanh")
+    $correctPasswords = @("funstud!o", "kien", "quoc", "vanh")
 
     $loginForm = New-Object System.Windows.Forms.Form
     $loginForm.Text = "Login"
@@ -151,6 +151,65 @@ function Get-TransactionJson {
         [string]$transactionId
     )
 
+    function Get-DbValue {
+        param($reader, [string]$name, $defaultValue = $null)
+
+        try {
+            $index = $reader.GetOrdinal($name)
+            $value = $reader.GetValue($index)
+            if ($value -eq [DBNull]::Value -or $null -eq $value) {
+                return $defaultValue
+            }
+            return $value
+        } catch {
+            return $defaultValue
+        }
+    }
+
+    function Get-DbInt {
+        param($reader, [string]$name, [int]$defaultValue = 0)
+        $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+        try {
+            if ($null -eq $value -or $value -eq '') { return $defaultValue }
+            return [int]$value
+        } catch {
+            return $defaultValue
+        }
+    }
+
+    function Get-DbDecimal {
+        param($reader, [string]$name, [decimal]$defaultValue = 0)
+        $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+        try {
+            if ($null -eq $value -or $value -eq '') { return $defaultValue }
+            return [decimal]$value
+        } catch {
+            return $defaultValue
+        }
+    }
+
+    function Get-DbString {
+        param($reader, [string]$name, [string]$defaultValue = '')
+        $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+        if ($null -eq $value -or $value -eq [DBNull]::Value) { return $defaultValue }
+        return [string]$value
+    }
+
+    function Get-DbBool {
+        param($reader, [string]$name, [bool]$defaultValue = $false)
+        $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+        if ($null -eq $value -or $value -eq [DBNull]::Value -or $value -eq '') { return $defaultValue }
+        try {
+            if ($value -is [bool]) { return $value }
+            if ($value -is [string]) {
+                return ($value.ToLower() -eq 'true' -or $value -eq '1')
+            }
+            return ([int]$value -eq 1)
+        } catch {
+            return $defaultValue
+        }
+    }
+
     $cmd = $global:SQLiteConnection.CreateCommand()
     $cmd.CommandText = "SELECT * FROM Transactions WHERE Id = @id LIMIT 1"
     $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
@@ -162,27 +221,98 @@ function Get-TransactionJson {
         return $null
     }
 
-    $result = [ordered]@{}
-
-    for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-        $name = $reader.GetName($i)
-        $value = $reader.GetValue($i)
-
-        if ($value -eq [DBNull]::Value) {
-            $result[$name] = $null
-            continue
+    # ===== listImages: lấy từ cột Transactions.Images và ép về đúng format API =====
+    $listImages = @()
+    $imagesRaw = Get-DbString -reader $reader -name "Images" -defaultValue "[]"
+    if (-not [string]::IsNullOrWhiteSpace($imagesRaw)) {
+        try {
+            $parsedImages = $imagesRaw | ConvertFrom-Json
+            if ($null -ne $parsedImages) {
+                foreach ($img in @($parsedImages)) {
+                    $listImages += [ordered]@{
+                        fileName = if ($null -ne $img.fileName) { [string]$img.fileName } else { "" }
+                        rotate = if ($null -ne $img.rotate) { [decimal]$img.rotate } else { 0 }
+                        flip = if ($null -ne $img.flip) { [int]$img.flip } else { 0 }
+                        isDigitalBackground = if ($null -ne $img.isDigitalBackground) { [bool]$img.isDigitalBackground } else { $false }
+                        digitalBackgroundId = if ($null -ne $img.digitalBackgroundId) { [int]$img.digitalBackgroundId } else { 0 }
+                    }
+                }
+            }
+        } catch {
+            $listImages = @()
         }
+    }
 
-        if ($name -eq "Images" -or $name -eq "LayoutParameters") {
-            try {
-                $result[$name] = $value.ToString() | ConvertFrom-Json
-            } catch {
-                $result[$name] = $value.ToString()
+    # ===== listSticker: lấy từ bảng TransactionStickers =====
+    $listSticker = @()
+    try {
+        $stickerCmd = $global:SQLiteConnection.CreateCommand()
+        $stickerCmd.CommandText = "SELECT StickerId, Width, Height, AxisX, AxisY FROM TransactionStickers WHERE TransactionId = @id"
+        $stickerCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
+        $stickerReader = $stickerCmd.ExecuteReader()
+        while ($stickerReader.Read()) {
+            $listSticker += [ordered]@{
+                rotate = 0
+                stickerId = Get-DbInt -reader $stickerReader -name "StickerId" -defaultValue 0
+                width = Get-DbInt -reader $stickerReader -name "Width" -defaultValue 0
+                height = Get-DbInt -reader $stickerReader -name "Height" -defaultValue 0
+                axisX = Get-DbInt -reader $stickerReader -name "AxisX" -defaultValue 0
+                axisY = Get-DbInt -reader $stickerReader -name "AxisY" -defaultValue 0
             }
         }
-        else {
-            $result[$name] = $value
+        $stickerReader.Close()
+    } catch {
+        $listSticker = @()
+    }
+
+    # ===== isAiFlow: true nếu có PromptTemplateId hoặc có bản ghi trong GoogleAIQueues =====
+    $isAiFlow = $false
+    $promptTemplateId = Get-DbInt -reader $reader -name "PromptTemplateId" -defaultValue 0
+    if ($promptTemplateId -gt 0) {
+        $isAiFlow = $true
+    } else {
+        try {
+            $aiCmd = $global:SQLiteConnection.CreateCommand()
+            $aiCmd.CommandText = "SELECT COUNT(1) FROM GoogleAIQueues WHERE TransactionId = @id"
+            $aiCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
+            $isAiFlow = ([int]$aiCmd.ExecuteScalar() -gt 0)
+        } catch {
+            $isAiFlow = $false
         }
+    }
+
+    $result = [ordered]@{
+        code = Get-DbString -reader $reader -name "Code" -defaultValue ""
+        PaymentMethod = Get-DbInt -reader $reader -name "PaymentMethod" -defaultValue 0
+        frameId = Get-DbInt -reader $reader -name "FrameId" -defaultValue 0
+        layoutId = Get-DbInt -reader $reader -name "LayoutId" -defaultValue 0
+        themeId = Get-DbInt -reader $reader -name "ThemeId" -defaultValue 0
+        backgroundId = Get-DbInt -reader $reader -name "BackgroundId" -defaultValue 0
+        filterId = Get-DbInt -reader $reader -name "FilterId" -defaultValue 0
+        transactionId = Get-DbString -reader $reader -name "Id" -defaultValue $transactionId
+        themeDetailId = 0
+        captureMode = Get-DbInt -reader $reader -name "CaptureMode" -defaultValue 0
+        isFile = Get-DbBool -reader $reader -name "IsFile" -defaultValue $false
+        isVideo = ((Get-DbInt -reader $reader -name "NumberOfGenVideo" -defaultValue 0) -gt 0)
+        voucherCode = Get-DbString -reader $reader -name "VoucherCode" -defaultValue ""
+        purchaseDuration = Get-DbInt -reader $reader -name "PurchaseDuration" -defaultValue 0
+        captureDuration = Get-DbInt -reader $reader -name "CaptureDuration" -defaultValue 0
+        editDuration = Get-DbInt -reader $reader -name "EditDuration" -defaultValue 0
+        printNumber = Get-DbInt -reader $reader -name "PrintNumber" -defaultValue 0
+        layoutAmount = Get-DbDecimal -reader $reader -name "LayoutAmount" -defaultValue 0
+        printAmount = Get-DbDecimal -reader $reader -name "PrintAmount" -defaultValue 0
+        discount = Get-DbDecimal -reader $reader -name "Discount" -defaultValue 0
+        deposit = Get-DbDecimal -reader $reader -name "Deposit" -defaultValue 0
+        pinCode = Get-DbString -reader $reader -name "Pincode" -defaultValue ""
+        refundAmount = Get-DbDecimal -reader $reader -name "RefundAmount" -defaultValue 0
+        refundReason = Get-DbString -reader $reader -name "RefundReason" -defaultValue ""
+        isConfirmPolicy = Get-DbBool -reader $reader -name "IsConfirmPolicy" -defaultValue $false
+        isSelfBooth = ((Get-DbInt -reader $reader -name "Type" -defaultValue 0) -eq 1)
+        listSticker = $listSticker
+        listImages = $listImages
+        isAiFlow = $isAiFlow
+        promptTemplateId = $promptTemplateId
+        pinCodeDownload = Get-DbString -reader $reader -name "Pincode" -defaultValue ""
     }
 
     $reader.Close()
