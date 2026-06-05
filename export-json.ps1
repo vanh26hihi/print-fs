@@ -2,7 +2,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # Load SQLite DLL manually from local file
-$sqliteDllPath = "D:\\Work\\PhotoBooth\\Data\\System.Data.SQLite.dll"
+$sqliteDllPath = "D:\Work\PhotoBooth\Data\System.Data.SQLite.dll"
 if (-not (Test-Path $sqliteDllPath)) {
     try {
         Invoke-WebRequest -Uri "https://github.com/trankien27/print-fs/raw/refs/heads/main/System.Data.SQLite.dll" `
@@ -96,6 +96,25 @@ function Show-LoginForm {
     return $loginForm.Tag -eq $true
 }
 
+function Write-ApiLog {
+    param(
+        [string]$message
+    )
+
+    try {
+        $logDir = "D:\Work\PhotoBooth\Logs"
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+
+        $logPath = Join-Path $logDir "process-api.log"
+        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message"
+        Add-Content -Path $logPath -Value $line -Encoding UTF8
+    } catch {
+        # Không chặn flow nếu ghi log lỗi
+    }
+}
+
 function Send-ToPrintAPI {
     param (
         [string]$transactionId,
@@ -119,29 +138,11 @@ function Send-ToPrintAPI {
     }
 }
 
-function Write-ProcessVideoLog {
-    param(
-        [string]$message
-    )
-
-    try {
-        $logDir = "D:\Work\PhotoBooth\Logs"
-        if (-not (Test-Path $logDir)) {
-            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-        }
-
-        $logPath = Join-Path $logDir "process-video-api.log"
-        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message"
-        Add-Content -Path $logPath -Value $line -Encoding UTF8
-    } catch {
-        # Không chặn flow nếu ghi log lỗi
-    }
-}
-
-function Send-ToProcessVideoAPI {
+function Send-ToProcessAPI {
     param (
         [string]$transactionId,
-        [string]$apiUrl = "http://localhost:8088/api/file/processvideo"
+        [string]$apiUrl,
+        [string]$apiName
     )
 
     $json = $null
@@ -150,22 +151,22 @@ function Send-ToProcessVideoAPI {
         $json = Get-TransactionJson -transactionId $transactionId
 
         if (-not $json) {
-            [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction để ProcessVideo!", "Error")
+            [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction để $apiName!", "Error")
             return
         }
 
         $txtJson.Text = @"
-===== REQUEST URL =====
+===== $apiName REQUEST URL =====
 $apiUrl
 
-===== REQUEST BODY =====
+===== $apiName REQUEST BODY =====
 $json
 
-Đang gửi API...
+Đang gửi API $apiName...
 "@
 
-        Write-ProcessVideoLog "REQUEST_URL=$apiUrl"
-        Write-ProcessVideoLog "REQUEST_BODY=$json"
+        Write-ApiLog "$apiName REQUEST_URL=$apiUrl"
+        Write-ApiLog "$apiName REQUEST_BODY=$json"
 
         $response = Invoke-WebRequest `
             -Uri $apiUrl `
@@ -182,29 +183,33 @@ $json
         }
 
         $logText = @"
-===== REQUEST URL =====
+===== $apiName REQUEST URL =====
 $apiUrl
 
-===== REQUEST BODY =====
+===== $apiName REQUEST BODY =====
 $json
 
-===== RESPONSE CODE =====
+===== $apiName RESPONSE CODE =====
 $responseCode
 
-===== RESPONSE BODY =====
+===== $apiName RESPONSE BODY =====
 $responseBody
 "@
 
         $txtJson.Text = $logText
 
-        Write-ProcessVideoLog "RESPONSE_CODE=$responseCode"
-        Write-ProcessVideoLog "RESPONSE_BODY=$responseBody"
+        Write-ApiLog "$apiName RESPONSE_CODE=$responseCode"
+        Write-ApiLog "$apiName RESPONSE_BODY=$responseBody"
 
-        [System.Windows.Forms.MessageBox]::Show("✅ ProcessVideo thành công!`nResponse Code: $responseCode", "Success")
+        [System.Windows.Forms.MessageBox]::Show("✅ $apiName thành công!`nResponse Code: $responseCode", "Success")
     }
     catch {
         $responseCode = "Unknown"
         $responseBody = $_.Exception.Message
+
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $responseBody = $_.ErrorDetails.Message
+        }
 
         try {
             if ($_.Exception.Response -ne $null) {
@@ -223,32 +228,54 @@ $responseBody
                 }
             }
         } catch {
-            # Nếu đọc response lỗi thì giữ message gốc
+            # Bỏ qua lỗi đọc response body
         }
 
         $logText = @"
-===== REQUEST URL =====
+===== $apiName REQUEST URL =====
 $apiUrl
 
-===== REQUEST BODY =====
+===== $apiName REQUEST BODY =====
 $json
 
-===== RESPONSE CODE =====
+===== $apiName RESPONSE CODE =====
 $responseCode
 
-===== RESPONSE BODY =====
+===== $apiName RESPONSE BODY =====
 $responseBody
 "@
 
         $txtJson.Text = $logText
 
-        Write-ProcessVideoLog "ERROR_REQUEST_URL=$apiUrl"
-        Write-ProcessVideoLog "ERROR_REQUEST_BODY=$json"
-        Write-ProcessVideoLog "ERROR_RESPONSE_CODE=$responseCode"
-        Write-ProcessVideoLog "ERROR_RESPONSE_BODY=$responseBody"
+        Write-ApiLog "$apiName ERROR_REQUEST_URL=$apiUrl"
+        Write-ApiLog "$apiName ERROR_REQUEST_BODY=$json"
+        Write-ApiLog "$apiName ERROR_RESPONSE_CODE=$responseCode"
+        Write-ApiLog "$apiName ERROR_RESPONSE_BODY=$responseBody"
 
-        [System.Windows.Forms.MessageBox]::Show("❌ ProcessVideo lỗi!`nResponse Code: $responseCode`n$responseBody", "Error")
+        [System.Windows.Forms.MessageBox]::Show("❌ $apiName lỗi!`nResponse Code: $responseCode`n$responseBody", "Error")
     }
+}
+
+function Send-ToProcessImageAPI {
+    param(
+        [string]$transactionId
+    )
+
+    Send-ToProcessAPI `
+        -transactionId $transactionId `
+        -apiUrl "http://localhost:8088/api/file/processimage" `
+        -apiName "ProcessImage"
+}
+
+function Send-ToProcessVideoAPI {
+    param(
+        [string]$transactionId
+    )
+
+    Send-ToProcessAPI `
+        -transactionId $transactionId `
+        -apiUrl "http://localhost:8088/api/file/processvideo" `
+        -apiName "ProcessVideo"
 }
 
 function Show-ImagePopup {
@@ -331,11 +358,15 @@ function Get-TransactionJson {
         param($reader, [string]$name, [bool]$defaultValue = $false)
         $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
         if ($null -eq $value -or $value -eq [DBNull]::Value -or $value -eq '') { return $defaultValue }
+
         try {
             if ($value -is [bool]) { return $value }
+
             if ($value -is [string]) {
-                return ($value.ToLower() -eq 'true' -or $value -eq '1')
+                $v = $value.ToLower().Trim()
+                return ($v -eq 'true' -or $v -eq '1')
             }
+
             return ([int]$value -eq 1)
         } catch {
             return $defaultValue
@@ -542,17 +573,17 @@ function Load-LayoutFilter {
 # =========================
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Transactions Viewer"
-$form.Size = New-Object System.Drawing.Size(1000, 780)
+$form.Size = New-Object System.Drawing.Size(1050, 820)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Regular)
 
 $listView = New-Object System.Windows.Forms.ListView
 $listView.Location = New-Object System.Drawing.Point(20, 20)
-$listView.Size = New-Object System.Drawing.Size(940, 400)
+$listView.Size = New-Object System.Drawing.Size(990, 400)
 $listView.View = [System.Windows.Forms.View]::Details
 $listView.FullRowSelect = $true
 $listView.GridLines = $true
-$listView.Columns.Add("TransactionId", 390)
+$listView.Columns.Add("TransactionId", 430)
 $listView.Columns.Add("Date", 220)
 $listView.Columns.Add("LayoutId", 120)
 $form.Controls.Add($listView)
@@ -560,65 +591,71 @@ $form.Controls.Add($listView)
 $lblSelected = New-Object System.Windows.Forms.Label
 $lblSelected.Text = "Selected TransactionId:"
 $lblSelected.Location = New-Object System.Drawing.Point(20, 440)
-$lblSelected.Size = New-Object System.Drawing.Size(700, 30)
+$lblSelected.Size = New-Object System.Drawing.Size(980, 30)
 $form.Controls.Add($lblSelected)
 
 $txtNumPrint = New-Object System.Windows.Forms.TextBox
-$txtNumPrint.Location = New-Object System.Drawing.Point(340, 480)
-$txtNumPrint.Size = New-Object System.Drawing.Size(80, 30)
+$txtNumPrint.Location = New-Object System.Drawing.Point(20, 480)
+$txtNumPrint.Size = New-Object System.Drawing.Size(80, 35)
 $txtNumPrint.Text = "1"
 $form.Controls.Add($txtNumPrint)
 
 $btnPrintNow = New-Object System.Windows.Forms.Button
 $btnPrintNow.Text = "Print"
-$btnPrintNow.Location = New-Object System.Drawing.Point(430, 480)
-$btnPrintNow.Size = New-Object System.Drawing.Size(120, 40)
+$btnPrintNow.Location = New-Object System.Drawing.Point(110, 480)
+$btnPrintNow.Size = New-Object System.Drawing.Size(100, 40)
 $form.Controls.Add($btnPrintNow)
-
-$txtSearch = New-Object System.Windows.Forms.TextBox
-$txtSearch.Location = New-Object System.Drawing.Point(20, 530)
-$txtSearch.Size = New-Object System.Drawing.Size(300, 30)
-$form.Controls.Add($txtSearch)
-
-$btnSearch = New-Object System.Windows.Forms.Button
-$btnSearch.Text = "Search"
-$btnSearch.Location = New-Object System.Drawing.Point(340, 530)
-$btnSearch.Size = New-Object System.Drawing.Size(100, 35)
-$form.Controls.Add($btnSearch)
-
-$cboLayoutFilter = New-Object System.Windows.Forms.ComboBox
-$cboLayoutFilter.Location = New-Object System.Drawing.Point(460, 530)
-$cboLayoutFilter.Size = New-Object System.Drawing.Size(200, 30)
-$cboLayoutFilter.DropDownStyle = "DropDownList"
-$form.Controls.Add($cboLayoutFilter)
 
 $btnViewImage = New-Object System.Windows.Forms.Button
 $btnViewImage.Text = "View Image"
-$btnViewImage.Location = New-Object System.Drawing.Point(570, 480)
+$btnViewImage.Location = New-Object System.Drawing.Point(220, 480)
 $btnViewImage.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnViewImage)
 
 $btnExportJson = New-Object System.Windows.Forms.Button
 $btnExportJson.Text = "Export JSON"
-$btnExportJson.Location = New-Object System.Drawing.Point(710, 480)
+$btnExportJson.Location = New-Object System.Drawing.Point(350, 480)
 $btnExportJson.Size = New-Object System.Drawing.Size(130, 40)
 $form.Controls.Add($btnExportJson)
 
 $btnCopyJson = New-Object System.Windows.Forms.Button
 $btnCopyJson.Text = "Copy JSON"
-$btnCopyJson.Location = New-Object System.Drawing.Point(850, 480)
-$btnCopyJson.Size = New-Object System.Drawing.Size(110, 40)
+$btnCopyJson.Location = New-Object System.Drawing.Point(490, 480)
+$btnCopyJson.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnCopyJson)
+
+$btnProcessImage = New-Object System.Windows.Forms.Button
+$btnProcessImage.Text = "Process Image"
+$btnProcessImage.Location = New-Object System.Drawing.Point(620, 480)
+$btnProcessImage.Size = New-Object System.Drawing.Size(170, 40)
+$form.Controls.Add($btnProcessImage)
 
 $btnProcessVideo = New-Object System.Windows.Forms.Button
 $btnProcessVideo.Text = "Process Video"
-$btnProcessVideo.Location = New-Object System.Drawing.Point(710, 530)
-$btnProcessVideo.Size = New-Object System.Drawing.Size(250, 35)
+$btnProcessVideo.Location = New-Object System.Drawing.Point(800, 480)
+$btnProcessVideo.Size = New-Object System.Drawing.Size(170, 40)
 $form.Controls.Add($btnProcessVideo)
 
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = New-Object System.Drawing.Point(20, 535)
+$txtSearch.Size = New-Object System.Drawing.Size(300, 35)
+$form.Controls.Add($txtSearch)
+
+$btnSearch = New-Object System.Windows.Forms.Button
+$btnSearch.Text = "Search"
+$btnSearch.Location = New-Object System.Drawing.Point(340, 535)
+$btnSearch.Size = New-Object System.Drawing.Size(100, 35)
+$form.Controls.Add($btnSearch)
+
+$cboLayoutFilter = New-Object System.Windows.Forms.ComboBox
+$cboLayoutFilter.Location = New-Object System.Drawing.Point(460, 535)
+$cboLayoutFilter.Size = New-Object System.Drawing.Size(200, 35)
+$cboLayoutFilter.DropDownStyle = "DropDownList"
+$form.Controls.Add($cboLayoutFilter)
+
 $txtJson = New-Object System.Windows.Forms.TextBox
-$txtJson.Location = New-Object System.Drawing.Point(20, 580)
-$txtJson.Size = New-Object System.Drawing.Size(940, 150)
+$txtJson.Location = New-Object System.Drawing.Point(20, 590)
+$txtJson.Size = New-Object System.Drawing.Size(990, 180)
 $txtJson.Multiline = $true
 $txtJson.ScrollBars = "Both"
 $txtJson.WordWrap = $false
@@ -680,6 +717,16 @@ $btnCopyJson.Add_Click({
     $txtJson.Text = $json
     [System.Windows.Forms.Clipboard]::SetText($json)
     [System.Windows.Forms.MessageBox]::Show("✅ Đã copy JSON!", "Success")
+})
+
+$btnProcessImage.Add_Click({
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        return
+    }
+
+    $transactionId = $listView.SelectedItems[0].Text
+    Send-ToProcessImageAPI -transactionId $transactionId
 })
 
 $btnProcessVideo.Add_Click({
