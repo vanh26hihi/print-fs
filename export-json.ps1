@@ -41,7 +41,7 @@ function Close-SQLiteConnection {
 }
 
 function Show-LoginForm {
-    $correctPasswords = @("funstud!o", "kien", "chien", "vanh")
+    $correctPasswords = @("funstud!o", "kien", "quoc", "vanh")
 
     $loginForm = New-Object System.Windows.Forms.Form
     $loginForm.Text = "Login"
@@ -144,6 +144,8 @@ function Send-ToProcessVideoAPI {
         [string]$apiUrl = "http://localhost:8088/api/file/processvideo"
     )
 
+    $json = $null
+
     try {
         $json = Get-TransactionJson -transactionId $transactionId
 
@@ -241,6 +243,7 @@ $responseBody
         $txtJson.Text = $logText
 
         Write-ProcessVideoLog "ERROR_REQUEST_URL=$apiUrl"
+        Write-ProcessVideoLog "ERROR_REQUEST_BODY=$json"
         Write-ProcessVideoLog "ERROR_RESPONSE_CODE=$responseCode"
         Write-ProcessVideoLog "ERROR_RESPONSE_BODY=$responseBody"
 
@@ -350,9 +353,10 @@ function Get-TransactionJson {
         return $null
     }
 
-    # ===== listImages: lấy từ cột Transactions.Images và ép về đúng format API =====
+    # ===== listImages =====
     $listImages = @()
     $imagesRaw = Get-DbString -reader $reader -name "Images" -defaultValue "[]"
+
     if (-not [string]::IsNullOrWhiteSpace($imagesRaw)) {
         try {
             $parsedImages = $imagesRaw | ConvertFrom-Json
@@ -372,12 +376,13 @@ function Get-TransactionJson {
         }
     }
 
-    # ===== listSticker: lấy từ bảng TransactionStickers =====
+    # ===== listSticker =====
     $listSticker = @()
     try {
         $stickerCmd = $global:SQLiteConnection.CreateCommand()
         $stickerCmd.CommandText = "SELECT StickerId, Width, Height, AxisX, AxisY FROM TransactionStickers WHERE TransactionId = @id"
         $stickerCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
+
         $stickerReader = $stickerCmd.ExecuteReader()
         while ($stickerReader.Read()) {
             $listSticker += [ordered]@{
@@ -394,9 +399,10 @@ function Get-TransactionJson {
         $listSticker = @()
     }
 
-    # ===== isAiFlow: true nếu có PromptTemplateId hoặc có bản ghi trong GoogleAIQueues =====
+    # ===== isAiFlow =====
     $isAiFlow = $false
     $promptTemplateId = Get-DbInt -reader $reader -name "PromptTemplateId" -defaultValue 0
+
     if ($promptTemplateId -gt 0) {
         $isAiFlow = $true
     } else {
