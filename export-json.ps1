@@ -316,9 +316,11 @@ function Get-TransactionJson {
         try {
             $index = $reader.GetOrdinal($name)
             $value = $reader.GetValue($index)
+
             if ($value -eq [DBNull]::Value -or $null -eq $value) {
                 return $defaultValue
             }
+
             return $value
         } catch {
             return $defaultValue
@@ -327,9 +329,14 @@ function Get-TransactionJson {
 
     function Get-DbInt {
         param($reader, [string]$name, [int]$defaultValue = 0)
+
         $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+
         try {
-            if ($null -eq $value -or $value -eq '') { return $defaultValue }
+            if ($null -eq $value -or $value -eq '') {
+                return $defaultValue
+            }
+
             return [int]$value
         } catch {
             return $defaultValue
@@ -338,29 +345,63 @@ function Get-TransactionJson {
 
     function Get-DbDecimal {
         param($reader, [string]$name, [decimal]$defaultValue = 0)
+
         $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
+
         try {
-            if ($null -eq $value -or $value -eq '') { return $defaultValue }
+            if ($null -eq $value -or $value -eq '') {
+                return $defaultValue
+            }
+
             return [decimal]$value
         } catch {
             return $defaultValue
         }
     }
 
-    function Get-DbString {
-        param($reader, [string]$name, [string]$defaultValue = '')
-        $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
-        if ($null -eq $value -or $value -eq [DBNull]::Value) { return $defaultValue }
+    function Get-DbStringOrString {
+        param($reader, [string]$name)
+
+        $value = Get-DbValue -reader $reader -name $name -defaultValue "string"
+
+        if ($null -eq $value -or $value -eq [DBNull]::Value) {
+            return "string"
+        }
+
+        $text = [string]$value
+
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return "string"
+        }
+
+        return $text
+    }
+
+    function Get-DbStringOrEmpty {
+        param($reader, [string]$name)
+
+        $value = Get-DbValue -reader $reader -name $name -defaultValue ""
+
+        if ($null -eq $value -or $value -eq [DBNull]::Value) {
+            return ""
+        }
+
         return [string]$value
     }
 
     function Get-DbBool {
         param($reader, [string]$name, [bool]$defaultValue = $false)
+
         $value = Get-DbValue -reader $reader -name $name -defaultValue $defaultValue
-        if ($null -eq $value -or $value -eq [DBNull]::Value -or $value -eq '') { return $defaultValue }
+
+        if ($null -eq $value -or $value -eq [DBNull]::Value -or $value -eq '') {
+            return $defaultValue
+        }
 
         try {
-            if ($value -is [bool]) { return $value }
+            if ($value -is [bool]) {
+                return $value
+            }
 
             if ($value -is [string]) {
                 $v = $value.ToLower().Trim()
@@ -384,19 +425,57 @@ function Get-TransactionJson {
         return $null
     }
 
-    # ===== listImages =====
+    $themeId = Get-DbInt -reader $reader -name "ThemeId" -defaultValue 0
+    $layoutId = Get-DbInt -reader $reader -name "LayoutId" -defaultValue 0
+
+    # ===== themeDetailId: lấy Id trong bảng LayoutThemes theo ThemeId + LayoutId =====
+    $themeDetailId = 0
+
+    try {
+        $themeDetailCmd = $global:SQLiteConnection.CreateCommand()
+        $themeDetailCmd.CommandText = @"
+SELECT Id
+FROM LayoutThemes
+WHERE ThemeId = @themeId
+  AND LayoutId = @layoutId
+LIMIT 1
+"@
+
+        $themeDetailCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@themeId", $themeId))) | Out-Null
+        $themeDetailCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layoutId", $layoutId))) | Out-Null
+
+        $themeDetailValue = $themeDetailCmd.ExecuteScalar()
+
+        if ($null -ne $themeDetailValue -and $themeDetailValue -ne [DBNull]::Value) {
+            $themeDetailId = [int]$themeDetailValue
+        }
+    } catch {
+        $themeDetailId = 0
+    }
+
+    # ===== listImages: lấy đúng JSON có sẵn trong Transactions.Images =====
     $listImages = @()
-    $imagesRaw = Get-DbString -reader $reader -name "Images" -defaultValue "[]"
+    $imagesRaw = Get-DbStringOrEmpty -reader $reader -name "Images"
 
     if (-not [string]::IsNullOrWhiteSpace($imagesRaw)) {
         try {
             $parsedImages = $imagesRaw | ConvertFrom-Json
+
             if ($null -ne $parsedImages) {
                 foreach ($img in @($parsedImages)) {
+                    $flipValue = $null
+                    if ($img.PSObject.Properties.Name -contains "flip") {
+                        if ($null -ne $img.flip) {
+                            $flipValue = [int]$img.flip
+                        } else {
+                            $flipValue = $null
+                        }
+                    }
+
                     $listImages += [ordered]@{
-                        fileName = if ($null -ne $img.fileName) { [string]$img.fileName } else { "" }
-                        rotate = if ($null -ne $img.rotate) { [decimal]$img.rotate } else { 0 }
-                        flip = if ($null -ne $img.flip) { [int]$img.flip } else { 0 }
+                        fileName = if ($null -ne $img.fileName) { [string]$img.fileName } else { "string" }
+                        rotate = if ($null -ne $img.rotate) { [decimal]$img.rotate } else { 0.0 }
+                        flip = $flipValue
                         isDigitalBackground = if ($null -ne $img.isDigitalBackground) { [bool]$img.isDigitalBackground } else { $false }
                         digitalBackgroundId = if ($null -ne $img.digitalBackgroundId) { [int]$img.digitalBackgroundId } else { 0 }
                     }
@@ -407,14 +486,20 @@ function Get-TransactionJson {
         }
     }
 
-    # ===== listSticker =====
+    # ===== listSticker: lấy từ bảng TransactionStickers theo TransactionId =====
     $listSticker = @()
+
     try {
         $stickerCmd = $global:SQLiteConnection.CreateCommand()
-        $stickerCmd.CommandText = "SELECT StickerId, Width, Height, AxisX, AxisY FROM TransactionStickers WHERE TransactionId = @id"
+        $stickerCmd.CommandText = @"
+SELECT StickerId, Width, Height, AxisX, AxisY
+FROM TransactionStickers
+WHERE TransactionId = @id
+"@
         $stickerCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
 
         $stickerReader = $stickerCmd.ExecuteReader()
+
         while ($stickerReader.Read()) {
             $listSticker += [ordered]@{
                 rotate = 0
@@ -425,42 +510,45 @@ function Get-TransactionJson {
                 axisY = Get-DbInt -reader $stickerReader -name "AxisY" -defaultValue 0
             }
         }
+
         $stickerReader.Close()
     } catch {
         $listSticker = @()
     }
 
-    # ===== isAiFlow =====
-    $isAiFlow = $false
-    $promptTemplateId = Get-DbInt -reader $reader -name "PromptTemplateId" -defaultValue 0
-
-    if ($promptTemplateId -gt 0) {
-        $isAiFlow = $true
-    } else {
-        try {
-            $aiCmd = $global:SQLiteConnection.CreateCommand()
-            $aiCmd.CommandText = "SELECT COUNT(1) FROM GoogleAIQueues WHERE TransactionId = @id"
-            $aiCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $transactionId))) | Out-Null
-            $isAiFlow = ([int]$aiCmd.ExecuteScalar() -gt 0)
-        } catch {
-            $isAiFlow = $false
+    # Nếu không có sticker thì vẫn xuất object mặc định theo format API
+    if (@($listSticker).Count -eq 0) {
+        $listSticker += [ordered]@{
+            rotate = 0
+            stickerId = 0
+            width = 0
+            height = 0
+            axisX = 0
+            axisY = 0
         }
     }
 
     $result = [ordered]@{
-        code = Get-DbString -reader $reader -name "Code" -defaultValue ""
+        code = Get-DbStringOrString -reader $reader -name "Code"
         PaymentMethod = Get-DbInt -reader $reader -name "PaymentMethod" -defaultValue 0
         frameId = Get-DbInt -reader $reader -name "FrameId" -defaultValue 0
-        layoutId = Get-DbInt -reader $reader -name "LayoutId" -defaultValue 0
-        themeId = Get-DbInt -reader $reader -name "ThemeId" -defaultValue 0
+        layoutId = $layoutId
+        themeId = $themeId
         backgroundId = Get-DbInt -reader $reader -name "BackgroundId" -defaultValue 0
         filterId = Get-DbInt -reader $reader -name "FilterId" -defaultValue 0
-        transactionId = Get-DbString -reader $reader -name "Id" -defaultValue $transactionId
-        themeDetailId = 0
+        transactionId = Get-DbStringOrEmpty -reader $reader -name "Id"
+        themeDetailId = $themeDetailId
         captureMode = Get-DbInt -reader $reader -name "CaptureMode" -defaultValue 0
-        isFile = ((Get-DbBool -reader $reader -name "IsFile" -defaultValue $false) -or (@($listImages).Count -gt 0))
+
+        # IsFile = 1 thì true
+        isFile = Get-DbBool -reader $reader -name "IsFile" -defaultValue $false
+
+        # NumberOfGenVideo > 0 thì true
         isVideo = ((Get-DbInt -reader $reader -name "NumberOfGenVideo" -defaultValue 0) -gt 0)
-        voucherCode = Get-DbString -reader $reader -name "VoucherCode" -defaultValue ""
+
+        # Không có thì string
+        voucherCode = Get-DbStringOrString -reader $reader -name "VoucherCode"
+
         purchaseDuration = Get-DbInt -reader $reader -name "PurchaseDuration" -defaultValue 0
         captureDuration = Get-DbInt -reader $reader -name "CaptureDuration" -defaultValue 0
         editDuration = Get-DbInt -reader $reader -name "EditDuration" -defaultValue 0
@@ -469,16 +557,25 @@ function Get-TransactionJson {
         printAmount = Get-DbDecimal -reader $reader -name "PrintAmount" -defaultValue 0
         discount = Get-DbDecimal -reader $reader -name "Discount" -defaultValue 0
         deposit = Get-DbDecimal -reader $reader -name "Deposit" -defaultValue 0
-        pinCode = Get-DbString -reader $reader -name "Pincode" -defaultValue ""
+
+        # Không có thì string
+        pinCode = Get-DbStringOrString -reader $reader -name "Pincode"
+
         refundAmount = Get-DbDecimal -reader $reader -name "RefundAmount" -defaultValue 0
-        refundReason = Get-DbString -reader $reader -name "RefundReason" -defaultValue ""
+
+        # Không có thì string
+        refundReason = Get-DbStringOrString -reader $reader -name "RefundReason"
+
         isConfirmPolicy = Get-DbBool -reader $reader -name "IsConfirmPolicy" -defaultValue $false
-        isSelfBooth = ((Get-DbInt -reader $reader -name "Type" -defaultValue 0) -eq 1)
+        isSelfBooth = Get-DbBool -reader $reader -name "Type" -defaultValue $false
+
         listSticker = $listSticker
         listImages = $listImages
-        isAiFlow = $isAiFlow
-        promptTemplateId = $promptTemplateId
-        pinCodeDownload = Get-DbString -reader $reader -name "Pincode" -defaultValue ""
+
+        # Mặc định theo yêu cầu
+        isAiFlow = $true
+        promptTemplateId = 0
+        pinCodeDownload = "string"
     }
 
     $reader.Close()
