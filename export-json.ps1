@@ -41,7 +41,7 @@ function Close-SQLiteConnection {
 }
 
 function Show-LoginForm {
-    $correctPasswords = @("funstud!o", "kien", "quoc", "vanh")
+    $correctPasswords = @("funstud!o", "kien", "chien", "vanh")
 
     $loginForm = New-Object System.Windows.Forms.Form
     $loginForm.Text = "Login"
@@ -116,6 +116,78 @@ function Send-ToPrintAPI {
         [System.Windows.Forms.MessageBox]::Show("✅ Print successfully!", "Success")
     } catch {
         [System.Windows.Forms.MessageBox]::Show("❌ Send error: $($_.Exception.Message)", "Error")
+    }
+}
+
+function Write-ProcessVideoLog {
+    param(
+        [string]$message
+    )
+
+    try {
+        $logDir = "D:\Work\PhotoBooth\Logs"
+        if (-not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+
+        $logPath = Join-Path $logDir "process-video-api.log"
+        $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $message"
+        Add-Content -Path $logPath -Value $line -Encoding UTF8
+    } catch {
+        # Không chặn flow nếu ghi log lỗi
+    }
+}
+
+function Send-ToProcessVideoAPI {
+    param (
+        [string]$transactionId,
+        [string]$apiUrl = "http://localhost:8088/api/File/ProcessVideo"
+    )
+
+    try {
+        $json = Get-TransactionJson -transactionId $transactionId
+
+        if (-not $json) {
+            [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction để ProcessVideo!", "Error")
+            return
+        }
+
+        $txtJson.Text = "===== REQUEST ProcessVideo =====`r`n$json`r`n`r`nĐang gửi API: $apiUrl ..."
+        Write-ProcessVideoLog "REQUEST transactionId=$transactionId url=$apiUrl body=$json"
+
+        $response = Invoke-WebRequest -Uri $apiUrl -Method POST -Body $json -ContentType "application/json" -UseBasicParsing
+        $responseText = $response.Content
+
+        if ([string]::IsNullOrWhiteSpace($responseText)) {
+            $responseText = "HTTP $($response.StatusCode) $($response.StatusDescription) - Empty response"
+        }
+
+        $logText = "===== REQUEST ProcessVideo =====`r`n$json`r`n`r`n===== RESPONSE ProcessVideo =====`r`n$responseText"
+        $txtJson.Text = $logText
+        Write-ProcessVideoLog "RESPONSE transactionId=$transactionId status=$($response.StatusCode) body=$responseText"
+
+        [System.Windows.Forms.MessageBox]::Show("✅ ProcessVideo thành công!`nHTTP $($response.StatusCode)`nLog: D:\Work\PhotoBooth\Logs\process-video-api.log", "Success")
+    } catch {
+        $errorText = $_.Exception.Message
+
+        try {
+            if ($_.Exception.Response -ne $null) {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream -ne $null) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    if (-not [string]::IsNullOrWhiteSpace($body)) {
+                        $errorText = "$errorText`r`n$body"
+                    }
+                }
+            }
+        } catch {
+            # Bỏ qua lỗi đọc response body
+        }
+
+        $txtJson.Text = "===== PROCESS VIDEO ERROR =====`r`n$errorText"
+        Write-ProcessVideoLog "ERROR transactionId=$transactionId error=$errorText"
+        [System.Windows.Forms.MessageBox]::Show("❌ ProcessVideo lỗi:`n$errorText", "Error")
     }
 }
 
@@ -292,7 +364,7 @@ function Get-TransactionJson {
         transactionId = Get-DbString -reader $reader -name "Id" -defaultValue $transactionId
         themeDetailId = 0
         captureMode = Get-DbInt -reader $reader -name "CaptureMode" -defaultValue 0
-        isFile = Get-DbBool -reader $reader -name "IsFile" -defaultValue $false
+        isFile = ((Get-DbBool -reader $reader -name "IsFile" -defaultValue $false) -or (@($listImages).Count -gt 0))
         isVideo = ((Get-DbInt -reader $reader -name "NumberOfGenVideo" -defaultValue 0) -gt 0)
         voucherCode = Get-DbString -reader $reader -name "VoucherCode" -defaultValue ""
         purchaseDuration = Get-DbInt -reader $reader -name "PurchaseDuration" -defaultValue 0
@@ -475,6 +547,12 @@ $btnCopyJson.Location = New-Object System.Drawing.Point(850, 480)
 $btnCopyJson.Size = New-Object System.Drawing.Size(110, 40)
 $form.Controls.Add($btnCopyJson)
 
+$btnProcessVideo = New-Object System.Windows.Forms.Button
+$btnProcessVideo.Text = "Process Video"
+$btnProcessVideo.Location = New-Object System.Drawing.Point(710, 530)
+$btnProcessVideo.Size = New-Object System.Drawing.Size(250, 35)
+$form.Controls.Add($btnProcessVideo)
+
 $txtJson = New-Object System.Windows.Forms.TextBox
 $txtJson.Location = New-Object System.Drawing.Point(20, 580)
 $txtJson.Size = New-Object System.Drawing.Size(940, 150)
@@ -539,6 +617,16 @@ $btnCopyJson.Add_Click({
     $txtJson.Text = $json
     [System.Windows.Forms.Clipboard]::SetText($json)
     [System.Windows.Forms.MessageBox]::Show("✅ Đã copy JSON!", "Success")
+})
+
+$btnProcessVideo.Add_Click({
+    if ($listView.SelectedItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        return
+    }
+
+    $transactionId = $listView.SelectedItems[0].Text
+    Send-ToProcessVideoAPI -transactionId $transactionId
 })
 
 $listView.Add_SelectedIndexChanged({
