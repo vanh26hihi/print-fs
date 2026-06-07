@@ -697,11 +697,37 @@ function Load-Transactions {
     param (
         [string]$searchText = "",
         [string]$layoutFilter = "",
-        [int]$page = 1
+        [int]$page = 1,
+        [bool]$refreshCount = $false
     )
+
+    if ($refreshCount -or $global:TotalPages -lt 1) {
+        $countCmd = $global:SQLiteConnection.CreateCommand()
+        $countQuery = "SELECT COUNT(*) FROM Transactions WHERE 1=1"
+
+        if ($searchText) {
+            $countQuery += " AND Id LIKE @search"
+            $countCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@search", "%$searchText%"))) | Out-Null
+        }
+
+        if ($layoutFilter -and $layoutFilter -ne "<All>") {
+            $countQuery += " AND LayoutId = @layout"
+            $countCmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layout", $layoutFilter))) | Out-Null
+        }
+
+        $countCmd.CommandText = $countQuery
+        $global:TotalRows = [int64]$countCmd.ExecuteScalar()
+        $global:TotalPages = [Math]::Max(
+            1,
+            [int][Math]::Ceiling($global:TotalRows / [double]$global:PageSize)
+        )
+    }
 
     if ($page -lt 1) {
         $page = 1
+    }
+    if ($page -gt $global:TotalPages) {
+        $page = $global:TotalPages
     }
 
     $global:LoadedSearchText = $searchText
@@ -736,7 +762,7 @@ function Load-Transactions {
     }
     $reader.Close()
 
-    $global:HasNextPage = $rows.Count -gt $global:PageSize
+    $global:HasNextPage = $page -lt $global:TotalPages
     $global:CurrentPage = $page
 
     $listView.BeginUpdate()
@@ -749,9 +775,12 @@ function Load-Transactions {
     }
     $listView.EndUpdate()
 
-    $lblPage.Text = "Page $global:CurrentPage"
+    $lblPage.Text = "Page $global:CurrentPage / $global:TotalPages"
+    $numPage.Maximum = [decimal]$global:TotalPages
+    $numPage.Value = [decimal]$global:CurrentPage
     $btnPrevious.Enabled = $global:CurrentPage -gt 1
     $btnNext.Enabled = $global:HasNextPage
+    $btnGoPage.Enabled = $global:TotalPages -gt 1
 }
 
 function Load-LayoutFilter {
@@ -781,6 +810,8 @@ $global:HasNextPage = $false
 $global:IsLoadingLayoutFilter = $false
 $global:LoadedSearchText = ""
 $global:LoadedLayoutFilter = "<All>"
+$global:TotalRows = 0
+$global:TotalPages = 0
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Transactions Viewer"
@@ -801,30 +832,46 @@ $form.Controls.Add($listView)
 
 $lblSelected = New-Object System.Windows.Forms.Label
 $lblSelected.Text = "Selected TransactionId:"
-$lblSelected.Location = New-Object System.Drawing.Point(390, 440)
-$lblSelected.Size = New-Object System.Drawing.Size(620, 30)
+$lblSelected.Location = New-Object System.Drawing.Point(500, 440)
+$lblSelected.Size = New-Object System.Drawing.Size(510, 30)
 $form.Controls.Add($lblSelected)
 
 $btnPrevious = New-Object System.Windows.Forms.Button
 $btnPrevious.Text = "Previous"
 $btnPrevious.Location = New-Object System.Drawing.Point(20, 435)
-$btnPrevious.Size = New-Object System.Drawing.Size(100, 35)
+$btnPrevious.Size = New-Object System.Drawing.Size(90, 35)
 $btnPrevious.Enabled = $false
 $form.Controls.Add($btnPrevious)
 
 $lblPage = New-Object System.Windows.Forms.Label
-$lblPage.Text = "Page 1"
-$lblPage.Location = New-Object System.Drawing.Point(130, 440)
-$lblPage.Size = New-Object System.Drawing.Size(100, 30)
+$lblPage.Text = "Page 1 / 1"
+$lblPage.Location = New-Object System.Drawing.Point(115, 440)
+$lblPage.Size = New-Object System.Drawing.Size(120, 30)
 $lblPage.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $form.Controls.Add($lblPage)
 
 $btnNext = New-Object System.Windows.Forms.Button
 $btnNext.Text = "Next"
 $btnNext.Location = New-Object System.Drawing.Point(240, 435)
-$btnNext.Size = New-Object System.Drawing.Size(100, 35)
+$btnNext.Size = New-Object System.Drawing.Size(75, 35)
 $btnNext.Enabled = $false
 $form.Controls.Add($btnNext)
+
+$numPage = New-Object System.Windows.Forms.NumericUpDown
+$numPage.Location = New-Object System.Drawing.Point(325, 437)
+$numPage.Size = New-Object System.Drawing.Size(70, 35)
+$numPage.Minimum = 1
+$numPage.Maximum = 1
+$numPage.Value = 1
+$numPage.TextAlign = [System.Windows.Forms.HorizontalAlignment]::Center
+$form.Controls.Add($numPage)
+
+$btnGoPage = New-Object System.Windows.Forms.Button
+$btnGoPage.Text = "Go"
+$btnGoPage.Location = New-Object System.Drawing.Point(405, 435)
+$btnGoPage.Size = New-Object System.Drawing.Size(65, 35)
+$btnGoPage.Enabled = $false
+$form.Controls.Add($btnGoPage)
 
 $txtNumPrint = New-Object System.Windows.Forms.TextBox
 $txtNumPrint.Location = New-Object System.Drawing.Point(20, 480)
@@ -871,7 +918,6 @@ $btnSearch = New-Object System.Windows.Forms.Button
 $btnSearch.Text = "Search"
 $btnSearch.Location = New-Object System.Drawing.Point(340, 535)
 $btnSearch.Size = New-Object System.Drawing.Size(100, 35)
-$btnSearch.Enabled = $false
 $form.Controls.Add($btnSearch)
 
 $cboLayoutFilter = New-Object System.Windows.Forms.ComboBox
@@ -965,18 +1011,12 @@ $listView.Add_SelectedIndexChanged({
 
 $btnSearch.Add_Click({
     $searchText = $txtSearch.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($searchText)) {
-        [System.Windows.Forms.MessageBox]::Show(
-            "Enter a transaction ID before searching.",
-            "Search"
-        )
-        return
-    }
 
     Load-Transactions `
         -searchText $searchText `
         -layoutFilter $cboLayoutFilter.SelectedItem `
-        -page 1
+        -page 1 `
+        -refreshCount $true
 })
 
 $txtSearch.Add_KeyDown({
@@ -987,16 +1027,13 @@ $txtSearch.Add_KeyDown({
     }
 })
 
-$txtSearch.Add_TextChanged({
-    $btnSearch.Enabled = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
-})
-
 $cboLayoutFilter.Add_SelectedIndexChanged({
     if (-not $global:IsLoadingLayoutFilter) {
         Load-Transactions `
             -searchText $global:LoadedSearchText `
             -layoutFilter $cboLayoutFilter.SelectedItem `
-            -page 1
+            -page 1 `
+            -refreshCount $true
     }
 })
 
@@ -1018,10 +1055,20 @@ $btnNext.Add_Click({
     }
 })
 
+$btnGoPage.Add_Click({
+    $targetPage = [int]$numPage.Value
+    if ($targetPage -ne $global:CurrentPage) {
+        Load-Transactions `
+            -searchText $global:LoadedSearchText `
+            -layoutFilter $global:LoadedLayoutFilter `
+            -page $targetPage
+    }
+})
+
 if (Show-LoginForm) {
     Open-SQLiteConnection
     Load-LayoutFilter
-    Load-Transactions -page 1
+    Load-Transactions -page 1 -refreshCount $true
     $form.TopMost = $false
     [void]$form.ShowDialog()
     Close-SQLiteConnection
