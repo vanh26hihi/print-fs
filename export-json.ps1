@@ -141,13 +141,20 @@ function Send-ToProcessAPI {
     param (
         [string]$transactionId,
         [string]$apiUrl,
-        [string]$apiName
+        [string]$apiName,
+        [string]$requestJson = ""
     )
 
     $json = $null
 
     try {
-        $json = Get-TransactionJson -transactionId $transactionId -apiName $apiName
+        if ([string]::IsNullOrWhiteSpace($requestJson)) {
+            $json = Get-TransactionJson -transactionId $transactionId -apiName $apiName
+        } else {
+            # Edited retry JSON is sent directly and is never written to SQLite.
+            $null = $requestJson | ConvertFrom-Json -ErrorAction Stop
+            $json = $requestJson
+        }
 
         if (-not $json) {
             [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction để $apiName!", "Error")
@@ -250,8 +257,116 @@ $responseBody
         Write-ApiLog "$apiName ERROR_RESPONSE_CODE=$responseCode"
         Write-ApiLog "$apiName ERROR_RESPONSE_BODY=$responseBody"
 
-        [System.Windows.Forms.MessageBox]::Show("❌ $apiName lỗi!`nResponse Code: $responseCode`n$responseBody", "Error")
+        Show-ProcessRetryPopup `
+            -transactionId $transactionId `
+            -apiUrl $apiUrl `
+            -apiName $apiName `
+            -json $json `
+            -responseCode $responseCode `
+            -responseBody $responseBody
     }
+}
+
+function Show-ProcessRetryPopup {
+    param(
+        [string]$transactionId,
+        [string]$apiUrl,
+        [string]$apiName,
+        [string]$json,
+        [string]$responseCode,
+        [string]$responseBody
+    )
+
+    $retryForm = New-Object System.Windows.Forms.Form
+    $retryForm.Text = "$apiName failed - Edit JSON and retry"
+    $retryForm.Size = New-Object System.Drawing.Size(900, 720)
+    $retryForm.StartPosition = "CenterParent"
+    $retryForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $retryForm.TopMost = $false
+    $retryForm.ShowInTaskbar = $false
+
+    $lblError = New-Object System.Windows.Forms.Label
+    $lblError.Text = "Response code: $responseCode`r`n$responseBody"
+    $lblError.Location = New-Object System.Drawing.Point(15, 15)
+    $lblError.Size = New-Object System.Drawing.Size(850, 85)
+    $lblError.AutoEllipsis = $true
+    $retryForm.Controls.Add($lblError)
+
+    $txtRetryJson = New-Object System.Windows.Forms.TextBox
+    $txtRetryJson.Location = New-Object System.Drawing.Point(15, 110)
+    $txtRetryJson.Size = New-Object System.Drawing.Size(850, 500)
+    $txtRetryJson.Multiline = $true
+    $txtRetryJson.ScrollBars = "Both"
+    $txtRetryJson.WordWrap = $false
+    $txtRetryJson.AcceptsTab = $true
+    $txtRetryJson.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $txtRetryJson.Text = $json
+    $retryForm.Controls.Add($txtRetryJson)
+
+    $btnRemoveF1 = New-Object System.Windows.Forms.Button
+    $btnRemoveF1.Text = "Remove _f1"
+    $btnRemoveF1.Location = New-Object System.Drawing.Point(15, 625)
+    $btnRemoveF1.Size = New-Object System.Drawing.Size(140, 38)
+    $retryForm.Controls.Add($btnRemoveF1)
+
+    $btnRetry = New-Object System.Windows.Forms.Button
+    $btnRetry.Text = "Send again"
+    $btnRetry.Location = New-Object System.Drawing.Point(575, 625)
+    $btnRetry.Size = New-Object System.Drawing.Size(140, 38)
+    $retryForm.Controls.Add($btnRetry)
+
+    $btnCloseRetry = New-Object System.Windows.Forms.Button
+    $btnCloseRetry.Text = "Close"
+    $btnCloseRetry.Location = New-Object System.Drawing.Point(725, 625)
+    $btnCloseRetry.Size = New-Object System.Drawing.Size(140, 38)
+    $retryForm.Controls.Add($btnCloseRetry)
+
+    $btnRemoveF1.Add_Click({
+        try {
+            $body = $txtRetryJson.Text | ConvertFrom-Json -ErrorAction Stop
+
+            if ($null -ne $body.listImages) {
+                foreach ($image in @($body.listImages)) {
+                    if ($null -ne $image.fileName) {
+                        $image.fileName = ([string]$image.fileName) -replace '_f1(?=\.[^\\/.]+$)', ''
+                    }
+                }
+            }
+
+            $txtRetryJson.Text = $body | ConvertTo-Json -Depth 20
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                "JSON is invalid: $($_.Exception.Message)",
+                "Invalid JSON"
+            )
+        }
+    })
+
+    $btnRetry.Add_Click({
+        try {
+            $null = $txtRetryJson.Text | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                "JSON is invalid: $($_.Exception.Message)",
+                "Invalid JSON"
+            )
+            return
+        }
+
+        $editedJson = $txtRetryJson.Text
+        $retryForm.Close()
+        Send-ToProcessAPI `
+            -transactionId $transactionId `
+            -apiUrl $apiUrl `
+            -apiName $apiName `
+            -requestJson $editedJson
+    })
+
+    $btnCloseRetry.Add_Click({
+        $retryForm.Close()
+    })
+
+    [void]$retryForm.ShowDialog($form)
 }
 
 function Send-ToProcessImageAPI {
@@ -532,8 +647,8 @@ WHERE TransactionId = @id
         themeDetailId = $themeDetailId
         captureMode = Get-DbInt -reader $reader -name "CaptureMode" -defaultValue 0
 
-        # IsFile = 1 thì true
-        isFile = Get-DbBool -reader $reader -name "IsFile" -defaultValue $false
+        # SQLite may return INTEGER columns as Int64; normalize numerically.
+        isFile = ((Get-DbInt -reader $reader -name "IsFile" -defaultValue 0) -ne 0)
 
         # Theo yêu cầu: luôn true
         isVideo = $true
@@ -578,42 +693,20 @@ WHERE TransactionId = @id
     return ($result | ConvertTo-Json -Depth 20)
 }
 
-function Export-TransactionJson {
-    param(
-        [string]$transactionId
-    )
-
-    try {
-        $json = Get-TransactionJson -transactionId $transactionId -apiName "Export"
-
-        if (-not $json) {
-            [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction!", "Error")
-            return
-        }
-
-        $txtJson.Text = $json
-
-        $saveDialog = New-Object System.Windows.Forms.SaveFileDialog
-        $saveDialog.Filter = "JSON files (*.json)|*.json"
-        $saveDialog.FileName = "$transactionId.json"
-        $saveDialog.Title = "Save Transaction JSON"
-
-        if ($saveDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $json | Out-File -FilePath $saveDialog.FileName -Encoding utf8
-            [System.Windows.Forms.MessageBox]::Show("✅ Export JSON thành công!`n$($saveDialog.FileName)", "Success")
-        }
-    } catch {
-        [System.Windows.Forms.MessageBox]::Show("❌ Export JSON lỗi: $($_.Exception.Message)", "Error")
-    }
-}
-
 function Load-Transactions {
     param (
         [string]$searchText = "",
-        [string]$layoutFilter = ""
+        [string]$layoutFilter = "",
+        [int]$page = 1
     )
 
-    $listView.Items.Clear()
+    if ($page -lt 1) {
+        $page = 1
+    }
+
+    $global:LoadedSearchText = $searchText
+    $global:LoadedLayoutFilter = $layoutFilter
+    $offset = ($page - 1) * $global:PageSize
     $cmd = $global:SQLiteConnection.CreateCommand()
     $query = "SELECT Id, RecordAt, LayoutId FROM Transactions WHERE 1=1"
 
@@ -627,21 +720,38 @@ function Load-Transactions {
         $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layout", $layoutFilter))) | Out-Null
     }
 
-    $query += " ORDER BY RecordAt DESC LIMIT 200"
+    $query += " ORDER BY RecordAt DESC LIMIT @limit OFFSET @offset"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@limit", ($global:PageSize + 1)))) | Out-Null
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@offset", $offset))) | Out-Null
     $cmd.CommandText = $query
 
+    $rows = @()
     $reader = $cmd.ExecuteReader()
     while ($reader.Read()) {
-        $id = $reader["Id"]
-        $date = ([datetime]$reader["RecordAt"]).ToString("yyyy-MM-dd HH:mm")
-        $layout = $reader["LayoutId"]
-
-        $item = New-Object System.Windows.Forms.ListViewItem($id)
-        $item.SubItems.Add($date)
-        $item.SubItems.Add($layout)
-        $listView.Items.Add($item)
+        $rows += ,@(
+            [string]$reader["Id"],
+            ([datetime]$reader["RecordAt"]).ToString("yyyy-MM-dd HH:mm"),
+            [string]$reader["LayoutId"]
+        )
     }
     $reader.Close()
+
+    $global:HasNextPage = $rows.Count -gt $global:PageSize
+    $global:CurrentPage = $page
+
+    $listView.BeginUpdate()
+    $listView.Items.Clear()
+    foreach ($row in @($rows | Select-Object -First $global:PageSize)) {
+        $item = New-Object System.Windows.Forms.ListViewItem($row[0])
+        $item.SubItems.Add($row[1])
+        $item.SubItems.Add($row[2])
+        $listView.Items.Add($item) | Out-Null
+    }
+    $listView.EndUpdate()
+
+    $lblPage.Text = "Page $global:CurrentPage"
+    $btnPrevious.Enabled = $global:CurrentPage -gt 1
+    $btnNext.Enabled = $global:HasNextPage
 }
 
 function Load-LayoutFilter {
@@ -657,12 +767,21 @@ function Load-LayoutFilter {
     }
     $reader.Close()
 
+    $global:IsLoadingLayoutFilter = $true
     $cboLayoutFilter.SelectedIndex = 0
+    $global:IsLoadingLayoutFilter = $false
 }
 
 # =========================
 # Form chính
 # =========================
+$global:PageSize = 20
+$global:CurrentPage = 1
+$global:HasNextPage = $false
+$global:IsLoadingLayoutFilter = $false
+$global:LoadedSearchText = ""
+$global:LoadedLayoutFilter = "<All>"
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Transactions Viewer"
 $form.Size = New-Object System.Drawing.Size(1050, 820)
@@ -682,9 +801,30 @@ $form.Controls.Add($listView)
 
 $lblSelected = New-Object System.Windows.Forms.Label
 $lblSelected.Text = "Selected TransactionId:"
-$lblSelected.Location = New-Object System.Drawing.Point(20, 440)
-$lblSelected.Size = New-Object System.Drawing.Size(980, 30)
+$lblSelected.Location = New-Object System.Drawing.Point(390, 440)
+$lblSelected.Size = New-Object System.Drawing.Size(620, 30)
 $form.Controls.Add($lblSelected)
+
+$btnPrevious = New-Object System.Windows.Forms.Button
+$btnPrevious.Text = "Previous"
+$btnPrevious.Location = New-Object System.Drawing.Point(20, 435)
+$btnPrevious.Size = New-Object System.Drawing.Size(100, 35)
+$btnPrevious.Enabled = $false
+$form.Controls.Add($btnPrevious)
+
+$lblPage = New-Object System.Windows.Forms.Label
+$lblPage.Text = "Page 1"
+$lblPage.Location = New-Object System.Drawing.Point(130, 440)
+$lblPage.Size = New-Object System.Drawing.Size(100, 30)
+$lblPage.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+$form.Controls.Add($lblPage)
+
+$btnNext = New-Object System.Windows.Forms.Button
+$btnNext.Text = "Next"
+$btnNext.Location = New-Object System.Drawing.Point(240, 435)
+$btnNext.Size = New-Object System.Drawing.Size(100, 35)
+$btnNext.Enabled = $false
+$form.Controls.Add($btnNext)
 
 $txtNumPrint = New-Object System.Windows.Forms.TextBox
 $txtNumPrint.Location = New-Object System.Drawing.Point(20, 480)
@@ -704,27 +844,21 @@ $btnViewImage.Location = New-Object System.Drawing.Point(220, 480)
 $btnViewImage.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnViewImage)
 
-$btnExportJson = New-Object System.Windows.Forms.Button
-$btnExportJson.Text = "Export JSON"
-$btnExportJson.Location = New-Object System.Drawing.Point(350, 480)
-$btnExportJson.Size = New-Object System.Drawing.Size(130, 40)
-$form.Controls.Add($btnExportJson)
-
 $btnCopyJson = New-Object System.Windows.Forms.Button
 $btnCopyJson.Text = "Copy JSON"
-$btnCopyJson.Location = New-Object System.Drawing.Point(490, 480)
+$btnCopyJson.Location = New-Object System.Drawing.Point(350, 480)
 $btnCopyJson.Size = New-Object System.Drawing.Size(120, 40)
 $form.Controls.Add($btnCopyJson)
 
 $btnProcessImage = New-Object System.Windows.Forms.Button
 $btnProcessImage.Text = "Process Image"
-$btnProcessImage.Location = New-Object System.Drawing.Point(620, 480)
+$btnProcessImage.Location = New-Object System.Drawing.Point(480, 480)
 $btnProcessImage.Size = New-Object System.Drawing.Size(170, 40)
 $form.Controls.Add($btnProcessImage)
 
 $btnProcessVideo = New-Object System.Windows.Forms.Button
 $btnProcessVideo.Text = "Process Video"
-$btnProcessVideo.Location = New-Object System.Drawing.Point(800, 480)
+$btnProcessVideo.Location = New-Object System.Drawing.Point(660, 480)
 $btnProcessVideo.Size = New-Object System.Drawing.Size(170, 40)
 $form.Controls.Add($btnProcessVideo)
 
@@ -737,6 +871,7 @@ $btnSearch = New-Object System.Windows.Forms.Button
 $btnSearch.Text = "Search"
 $btnSearch.Location = New-Object System.Drawing.Point(340, 535)
 $btnSearch.Size = New-Object System.Drawing.Size(100, 35)
+$btnSearch.Enabled = $false
 $form.Controls.Add($btnSearch)
 
 $cboLayoutFilter = New-Object System.Windows.Forms.ComboBox
@@ -780,16 +915,6 @@ $btnPrintNow.Add_Click({
     $transactionId = $selected.Text
     $layoutId = $selected.SubItems[2].Text
     Send-ToPrintAPI -transactionId $transactionId -layoutId $layoutId -numberOfImage $num
-})
-
-$btnExportJson.Add_Click({
-    if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
-        return
-    }
-
-    $transactionId = $listView.SelectedItems[0].Text
-    Export-TransactionJson -transactionId $transactionId
 })
 
 $btnCopyJson.Add_Click({
@@ -839,25 +964,65 @@ $listView.Add_SelectedIndexChanged({
 })
 
 $btnSearch.Add_Click({
-    Load-Transactions -searchText $txtSearch.Text.Trim() -layoutFilter $cboLayoutFilter.SelectedItem
+    $searchText = $txtSearch.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($searchText)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Enter a transaction ID before searching.",
+            "Search"
+        )
+        return
+    }
+
+    Load-Transactions `
+        -searchText $searchText `
+        -layoutFilter $cboLayoutFilter.SelectedItem `
+        -page 1
 })
 
 $txtSearch.Add_KeyDown({
     param($sender, $e)
     if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
-        Load-Transactions -searchText $txtSearch.Text.Trim() -layoutFilter $cboLayoutFilter.SelectedItem
+        $e.SuppressKeyPress = $true
+        $btnSearch.PerformClick()
     }
 })
 
+$txtSearch.Add_TextChanged({
+    $btnSearch.Enabled = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+})
+
 $cboLayoutFilter.Add_SelectedIndexChanged({
-    Load-Transactions -searchText $txtSearch.Text.Trim() -layoutFilter $cboLayoutFilter.SelectedItem
+    if (-not $global:IsLoadingLayoutFilter) {
+        Load-Transactions `
+            -searchText $global:LoadedSearchText `
+            -layoutFilter $cboLayoutFilter.SelectedItem `
+            -page 1
+    }
+})
+
+$btnPrevious.Add_Click({
+    if ($global:CurrentPage -gt 1) {
+        Load-Transactions `
+            -searchText $global:LoadedSearchText `
+            -layoutFilter $global:LoadedLayoutFilter `
+            -page ($global:CurrentPage - 1)
+    }
+})
+
+$btnNext.Add_Click({
+    if ($global:HasNextPage) {
+        Load-Transactions `
+            -searchText $global:LoadedSearchText `
+            -layoutFilter $global:LoadedLayoutFilter `
+            -page ($global:CurrentPage + 1)
+    }
 })
 
 if (Show-LoginForm) {
     Open-SQLiteConnection
-    Load-Transactions
     Load-LayoutFilter
-    $form.TopMost = $true
+    Load-Transactions -page 1
+    $form.TopMost = $false
     [void]$form.ShowDialog()
     Close-SQLiteConnection
 } else {
