@@ -8,7 +8,7 @@ if (-not (Test-Path $sqliteDllPath)) {
         Invoke-WebRequest -Uri "https://github.com/trankien27/print-fs/raw/refs/heads/main/System.Data.SQLite.dll" `
             -OutFile $sqliteDllPath -UseBasicParsing
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("❌ Cannot download SQLite DLL. Check internet connection or update URL.", "DLL Load Error")
+        [System.Windows.Forms.MessageBox]::Show("Cannot download SQLite DLL. Check internet connection or update URL.", "DLL Load Error")
         exit
     }
 }
@@ -131,9 +131,9 @@ function Send-ToPrintAPI {
 
         $json = $body | ConvertTo-Json -Depth 3
         $null = Invoke-RestMethod -Uri $apiUrl -Method POST -Body $json -ContentType "application/json"
-        [System.Windows.Forms.MessageBox]::Show("✅ Print successfully!", "Success")
+        [System.Windows.Forms.MessageBox]::Show("Print successfully!", "Success")
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("❌ Send error: $($_.Exception.Message)", "Error")
+        [System.Windows.Forms.MessageBox]::Show("Send error: $($_.Exception.Message)", "Error")
     }
 }
 
@@ -157,7 +157,7 @@ function Send-ToProcessAPI {
         }
 
         if (-not $json) {
-            [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction để $apiName!", "Error")
+            [System.Windows.Forms.MessageBox]::Show("Transaction not found for $apiName!", "Error")
             return
         }
 
@@ -168,7 +168,7 @@ $apiUrl
 ===== $apiName REQUEST BODY =====
 $json
 
-Đang gửi API $apiName...
+Sending API $apiName...
 "@
 
         Write-ApiLog "$apiName REQUEST_URL=$apiUrl"
@@ -207,7 +207,7 @@ $responseBody
         Write-ApiLog "$apiName RESPONSE_CODE=$responseCode"
         Write-ApiLog "$apiName RESPONSE_BODY=$responseBody"
 
-        [System.Windows.Forms.MessageBox]::Show("✅ $apiName thành công!`nResponse Code: $responseCode", "Success")
+        [System.Windows.Forms.MessageBox]::Show("$apiName completed successfully!`nResponse Code: $responseCode", "Success")
     }
     catch {
         $responseCode = "Unknown"
@@ -399,7 +399,7 @@ function Show-ImagePopup {
     $imagePath = "D:\Work\PhotoBooth\Image\$transactionId\$transactionId.png"
 
     if (-not (Test-Path $imagePath)) {
-        [System.Windows.Forms.MessageBox]::Show("❌ Image not found:`n$imagePath", "Error")
+        [System.Windows.Forms.MessageBox]::Show("Image not found:`n$imagePath", "Error")
         return
     }
 
@@ -566,7 +566,7 @@ LIMIT 1
         $themeDetailId = 0
     }
 
-    # listImages lấy từ Transactions.Images
+    # listImages comes from Transactions.Images
     $listImages = @()
     $imagesRaw = Get-DbStringOrEmpty -reader $reader -name "Images"
 
@@ -598,8 +598,8 @@ LIMIT 1
     }
 
     # listSticker:
-    # - ProcessImage: luôn để [] để tránh lỗi StickerMapper null khi stickerId = 0
-    # - ProcessVideo / Export: lấy sticker thật nếu có, không tự thêm stickerId = 0
+    # - ProcessImage: always [] to avoid StickerMapper null when stickerId = 0
+    # - ProcessVideo / Export: use real stickers only; do not add stickerId = 0
     $listSticker = @()
 
     if ($apiName -ne "ProcessImage") {
@@ -650,10 +650,10 @@ WHERE TransactionId = @id
         # SQLite may return INTEGER columns as Int64; normalize numerically.
         isFile = ((Get-DbInt -reader $reader -name "IsFile" -defaultValue 0) -ne 0)
 
-        # Theo yêu cầu: luôn true
+        # Required default: true
         isVideo = $true
 
-        # Không có thì để rỗng ""
+        # Use an empty string when missing.
         voucherCode = Get-DbStringOrEmpty -reader $reader -name "VoucherCode"
 
         purchaseDuration = Get-DbInt -reader $reader -name "PurchaseDuration" -defaultValue 0
@@ -665,24 +665,24 @@ WHERE TransactionId = @id
         discount = Get-DbDecimal -reader $reader -name "Discount" -defaultValue 0
         deposit = Get-DbDecimal -reader $reader -name "Deposit" -defaultValue 0
 
-        # Theo mẫu trước: không có thì "string"
+        # Use "string" when missing.
         pinCode = Get-DbStringOrString -reader $reader -name "Pincode"
 
         refundAmount = Get-DbDecimal -reader $reader -name "RefundAmount" -defaultValue 0
 
-        # Theo mẫu trước: không có thì "string"
+        # Use "string" when missing.
         refundReason = Get-DbStringOrString -reader $reader -name "RefundReason"
 
-        # IsConfirmPolicy = 1 thì true
+        # IsConfirmPolicy = 1 means true.
         isConfirmPolicy = Get-DbBool -reader $reader -name "IsConfirmPolicy" -defaultValue $false
 
-        # Theo mẫu: mặc định true
+        # Required default: true.
         isSelfBooth = $true
 
         listSticker = $listSticker
         listImages = $listImages
 
-        # Theo yêu cầu: mặc định
+        # Required defaults.
         isAiFlow = $true
         promptTemplateId = 0
         pinCodeDownload = "string"
@@ -802,7 +802,7 @@ function Load-LayoutFilter {
 }
 
 # =========================
-# Form chính
+# Main form
 # =========================
 $global:PageSize = 20
 $global:CurrentPage = 1
@@ -965,7 +965,7 @@ $btnPrintNow.Add_Click({
 
 $btnCopyJson.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        [System.Windows.Forms.MessageBox]::Show("Please select a transaction first!", "Missing data")
         return
     }
 
@@ -973,18 +973,18 @@ $btnCopyJson.Add_Click({
     $json = Get-TransactionJson -transactionId $transactionId -apiName "Export"
 
     if (-not $json) {
-        [System.Windows.Forms.MessageBox]::Show("Không tìm thấy transaction!", "Error")
+        [System.Windows.Forms.MessageBox]::Show("Transaction not found!", "Error")
         return
     }
 
     $txtJson.Text = $json
     [System.Windows.Forms.Clipboard]::SetText($json)
-    [System.Windows.Forms.MessageBox]::Show("✅ Đã copy JSON!", "Success")
+    [System.Windows.Forms.MessageBox]::Show("JSON copied!", "Success")
 })
 
 $btnProcessImage.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        [System.Windows.Forms.MessageBox]::Show("Please select a transaction first!", "Missing data")
         return
     }
 
@@ -994,7 +994,7 @@ $btnProcessImage.Add_Click({
 
 $btnProcessVideo.Add_Click({
     if ($listView.SelectedItems.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("Vui lòng chọn transaction trước!", "Missing data")
+        [System.Windows.Forms.MessageBox]::Show("Please select a transaction first!", "Missing data")
         return
     }
 
