@@ -1149,6 +1149,399 @@ function Send-ToSelfBoothPrintAPI {
     }
 }
 
+function Get-LayoutPictureCount {
+    param(
+        [int]$layoutId
+    )
+
+    $cmd = $global:SQLiteConnection.CreateCommand()
+    $cmd.CommandText = "SELECT COUNT(*) FROM LayoutPictures WHERE LayoutId = @layoutId"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layoutId", $layoutId))) | Out-Null
+    return [int]$cmd.ExecuteScalar()
+}
+
+function Add-PhotoThumbnails {
+    param(
+        $panel,
+        [string]$folder,
+        [string[]]$fileNames
+    )
+
+    $panel.SuspendLayout()
+    foreach ($fileName in $fileNames) {
+        $box = New-Object System.Windows.Forms.Panel
+        $box.Size = New-Object System.Drawing.Size(176, 206)
+        $box.Padding = New-Object System.Windows.Forms.Padding(3)
+        $box.Tag = $fileName
+        $box.Cursor = [System.Windows.Forms.Cursors]::Hand
+
+        $pictureBox = New-Object System.Windows.Forms.PictureBox
+        $pictureBox.Location = New-Object System.Drawing.Point(3, 3)
+        $pictureBox.Size = New-Object System.Drawing.Size(170, 170)
+        $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $pictureBox.Tag = $fileName
+
+        # Small thumbnail from a stream so the photo file is not locked
+        $stream = [System.IO.File]::OpenRead((Join-Path $folder $fileName))
+        try {
+            $img = [System.Drawing.Image]::FromStream($stream, $false, $false)
+            $ratio = [Math]::Min(170.0 / $img.Width, 170.0 / $img.Height)
+            $pictureBox.Image = New-Object System.Drawing.Bitmap($img, [int]([Math]::Max(1, $img.Width * $ratio)), [int]([Math]::Max(1, $img.Height * $ratio)))
+            $img.Dispose()
+        } catch {
+        } finally {
+            $stream.Close()
+        }
+        $box.Controls.Add($pictureBox)
+
+        $lblName = New-Object System.Windows.Forms.Label
+        $lblName.Text = $fileName
+        $lblName.Location = New-Object System.Drawing.Point(3, 176)
+        $lblName.Size = New-Object System.Drawing.Size(170, 25)
+        $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        $lblName.Tag = $fileName
+        $box.Controls.Add($lblName)
+
+        foreach ($control in @($box, $pictureBox, $lblName)) {
+            $control.Add_Click({ Select-PickerPhoto -fileName ([string]$this.Tag) })
+        }
+
+        $panel.Controls.Add($box)
+    }
+    $panel.ResumeLayout()
+}
+
+function Show-PhotoPickerPopup {
+    param(
+        [string]$transactionId,
+        [string]$json
+    )
+
+    $body = $json | ConvertFrom-Json
+    $details = @($body.photoPackageDetails)
+    if ($details.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No photoPackageDetails in JSON!", "Error")
+        return $null
+    }
+
+    $folder = "D:\Work\PhotoBooth\Image\$transactionId"
+    if (-not (Test-Path $folder)) {
+        [System.Windows.Forms.MessageBox]::Show("Folder not found:`n$folder", "Error")
+        return $null
+    }
+
+    # Photos of the transaction, same naming as BE: {n}.png original, {n}_f1.png smooth, {n}_f{filterId}.png filter
+    $allFiles = @(Get-ChildItem -Path $folder -File | Sort-Object Name | ForEach-Object { $_.Name })
+    $originalFiles = @($allFiles | Where-Object { $_ -match '^\d+\.(png|jpg|jpeg)$' })
+    $smoothFiles = @($allFiles | Where-Object { $_ -match '^\d+_f1\.(png|jpg|jpeg)$' })
+    $filterFiles = @($allFiles | Where-Object { $_ -match '^\d+_f[^\\/]+\.(png|jpg|jpeg)$' -and $_ -notmatch '^\d+_f1\.(png|jpg|jpeg)$' })
+
+    # Keep rotate / flip / digital background of photos already in the JSON (by original photo, any version)
+    $imageInfo = @{}
+    foreach ($image in @($body.listImages) + @($details | ForEach-Object { @($_.listImages) })) {
+        if ($null -ne $image -and $null -ne $image.fileName) {
+            $key = ([string]$image.fileName) -replace '_[^\\/]*(?=\.[^\\/.]+$)', ''
+            if (-not $imageInfo.ContainsKey($key)) {
+                $imageInfo[$key] = $image
+            }
+        }
+    }
+
+    $state = @{
+        Frames = New-Object System.Collections.ArrayList
+        Frame = 0
+        Slot = 0
+        Result = $null
+    }
+
+    $number = 1
+    foreach ($detail in $details) {
+        $need = Get-LayoutPictureCount -layoutId ([int]$detail.LayoutId)
+        $current = @(@($detail.listImages) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.fileName })
+        if ($need -le 0) {
+            $need = [Math]::Max(1, $current.Count)
+        }
+
+        $slots = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $need; $i++) {
+            [void]$slots.Add($(if ($i -lt $current.Count) { $current[$i] } else { "" }))
+        }
+
+        $type = if ([int]$detail.frameId -eq 1) { "2x6" } else { "4x6" }
+        [void]$state.Frames.Add(@{
+            Label = "#$number $type layout $($detail.LayoutId)"
+            Slots = $slots
+        })
+        $number++
+    }
+
+    $pickerForm = New-Object System.Windows.Forms.Form
+    $pickerForm.Text = "Choose photos - $transactionId"
+    $pickerForm.Size = New-Object System.Drawing.Size(1400, 860)
+    $pickerForm.StartPosition = "CenterParent"
+    $pickerForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $pickerForm.ShowInTaskbar = $false
+
+    $lblFrames = New-Object System.Windows.Forms.Label
+    $lblFrames.Text = "Frames"
+    $lblFrames.Location = New-Object System.Drawing.Point(10, 10)
+    $lblFrames.Size = New-Object System.Drawing.Size(340, 22)
+    $pickerForm.Controls.Add($lblFrames)
+
+    $lstFrames = New-Object System.Windows.Forms.ListBox
+    $lstFrames.Location = New-Object System.Drawing.Point(10, 35)
+    $lstFrames.Size = New-Object System.Drawing.Size(340, 110)
+    $pickerForm.Controls.Add($lstFrames)
+
+    $lblSlots = New-Object System.Windows.Forms.Label
+    $lblSlots.Text = "Photos of the frame (select a slot, then click a photo)"
+    $lblSlots.Location = New-Object System.Drawing.Point(10, 150)
+    $lblSlots.Size = New-Object System.Drawing.Size(340, 22)
+    $pickerForm.Controls.Add($lblSlots)
+
+    $lstSlots = New-Object System.Windows.Forms.ListBox
+    $lstSlots.Location = New-Object System.Drawing.Point(10, 175)
+    $lstSlots.Size = New-Object System.Drawing.Size(340, 230)
+    $pickerForm.Controls.Add($lstSlots)
+
+    $btnClearSlot = New-Object System.Windows.Forms.Button
+    $btnClearSlot.Text = "Clear slot"
+    $btnClearSlot.Location = New-Object System.Drawing.Point(10, 410)
+    $btnClearSlot.Size = New-Object System.Drawing.Size(165, 35)
+    $pickerForm.Controls.Add($btnClearSlot)
+
+    $btnClearFrame = New-Object System.Windows.Forms.Button
+    $btnClearFrame.Text = "Clear frame"
+    $btnClearFrame.Location = New-Object System.Drawing.Point(185, 410)
+    $btnClearFrame.Size = New-Object System.Drawing.Size(165, 35)
+    $pickerForm.Controls.Add($btnClearFrame)
+
+    $previewBox = New-Object System.Windows.Forms.PictureBox
+    $previewBox.Location = New-Object System.Drawing.Point(10, 455)
+    $previewBox.Size = New-Object System.Drawing.Size(340, 300)
+    $previewBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    $previewBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $pickerForm.Controls.Add($previewBox)
+
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Location = New-Object System.Drawing.Point(360, 10)
+    $tabs.Size = New-Object System.Drawing.Size(1015, 745)
+    $pickerForm.Controls.Add($tabs)
+
+    $tabDefs = @(
+        @{ Title = "Original ($($originalFiles.Count))"; Files = $originalFiles },
+        @{ Title = "Filter ($($filterFiles.Count))"; Files = $filterFiles },
+        @{ Title = "Smooth ($($smoothFiles.Count))"; Files = $smoothFiles }
+    )
+    $photoPanels = @()
+    foreach ($def in $tabDefs) {
+        $page = New-Object System.Windows.Forms.TabPage
+        $page.Text = $def.Title
+        $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $flow.Dock = [System.Windows.Forms.DockStyle]::Fill
+        $flow.AutoScroll = $true
+        $flow.Tag = @{ Files = $def.Files; Loaded = $false }
+        $page.Controls.Add($flow)
+        $tabs.TabPages.Add($page)
+        $photoPanels += $flow
+    }
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = "Apply"
+    $btnApply.Location = New-Object System.Drawing.Point(1080, 768)
+    $btnApply.Size = New-Object System.Drawing.Size(140, 38)
+    $pickerForm.Controls.Add($btnApply)
+
+    $btnCancelPicker = New-Object System.Windows.Forms.Button
+    $btnCancelPicker.Text = "Cancel"
+    $btnCancelPicker.Location = New-Object System.Drawing.Point(1235, 768)
+    $btnCancelPicker.Size = New-Object System.Drawing.Size(140, 38)
+    $pickerForm.Controls.Add($btnCancelPicker)
+
+    function Update-PickerFrames {
+        $lstFrames.BeginUpdate()
+        $lstFrames.Items.Clear()
+        foreach ($frame in $state.Frames) {
+            $filled = @($frame.Slots | Where-Object { $_ }).Count
+            [void]$lstFrames.Items.Add("$($frame.Label) ($filled/$($frame.Slots.Count) photos)")
+        }
+        $lstFrames.EndUpdate()
+        $lstFrames.SelectedIndex = $state.Frame
+    }
+
+    function Update-PickerSlots {
+        $frame = $state.Frames[$state.Frame]
+        $lstSlots.BeginUpdate()
+        $lstSlots.Items.Clear()
+        for ($i = 0; $i -lt $frame.Slots.Count; $i++) {
+            $name = if ($frame.Slots[$i]) { $frame.Slots[$i] } else { "(empty)" }
+            [void]$lstSlots.Items.Add("Slot $($i + 1): $name")
+        }
+        $lstSlots.EndUpdate()
+        if ($frame.Slots.Count -gt 0) {
+            $lstSlots.SelectedIndex = [Math]::Min($state.Slot, $frame.Slots.Count - 1)
+        }
+
+        # Photos used in the current frame are highlighted
+        foreach ($flow in $photoPanels) {
+            foreach ($box in $flow.Controls) {
+                $box.BackColor = if ($frame.Slots -contains $box.Tag) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.SystemColors]::Control }
+            }
+        }
+    }
+
+    function Update-PickerPreview {
+        $old = $previewBox.Image
+        $previewBox.Image = $null
+        if ($null -ne $old) {
+            $old.Dispose()
+        }
+
+        $fileName = $state.Frames[$state.Frame].Slots[$state.Slot]
+        if (-not $fileName) {
+            return
+        }
+
+        $path = Join-Path $folder $fileName
+        if (-not (Test-Path $path)) {
+            return
+        }
+
+        $stream = [System.IO.File]::OpenRead($path)
+        try {
+            $img = [System.Drawing.Image]::FromStream($stream, $false, $false)
+            $ratio = [Math]::Min(340.0 / $img.Width, 300.0 / $img.Height)
+            $previewBox.Image = New-Object System.Drawing.Bitmap($img, [int]([Math]::Max(1, $img.Width * $ratio)), [int]([Math]::Max(1, $img.Height * $ratio)))
+            $img.Dispose()
+        } catch {
+        } finally {
+            $stream.Close()
+        }
+    }
+
+    function Select-PickerPhoto {
+        param([string]$fileName)
+
+        $frame = $state.Frames[$state.Frame]
+        if ($frame.Slots.Count -eq 0) {
+            return
+        }
+
+        $frame.Slots[$state.Slot] = $fileName
+        # Move to the next slot like the FE
+        if ($state.Slot -lt $frame.Slots.Count - 1) {
+            $state.Slot++
+        }
+
+        Update-PickerFrames
+        Update-PickerSlots
+    }
+
+    function Show-PickerTab {
+        $flow = $photoPanels[$tabs.SelectedIndex]
+        if (-not $flow.Tag.Loaded) {
+            $pickerForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            Add-PhotoThumbnails -panel $flow -folder $folder -fileNames $flow.Tag.Files
+            $flow.Tag.Loaded = $true
+            $pickerForm.Cursor = [System.Windows.Forms.Cursors]::Default
+            Update-PickerSlots
+        }
+    }
+
+    $lstFrames.Add_SelectedIndexChanged({
+        if ($lstFrames.SelectedIndex -ge 0 -and $lstFrames.SelectedIndex -ne $state.Frame) {
+            $state.Frame = $lstFrames.SelectedIndex
+            $state.Slot = 0
+            Update-PickerSlots
+        }
+    })
+
+    $lstSlots.Add_SelectedIndexChanged({
+        if ($lstSlots.SelectedIndex -ge 0) {
+            $state.Slot = $lstSlots.SelectedIndex
+            Update-PickerPreview
+        }
+    })
+
+    $tabs.Add_SelectedIndexChanged({ Show-PickerTab })
+
+    $btnClearSlot.Add_Click({
+        $state.Frames[$state.Frame].Slots[$state.Slot] = ""
+        Update-PickerFrames
+        Update-PickerSlots
+    })
+
+    $btnClearFrame.Add_Click({
+        $frame = $state.Frames[$state.Frame]
+        for ($i = 0; $i -lt $frame.Slots.Count; $i++) {
+            $frame.Slots[$i] = ""
+        }
+        $state.Slot = 0
+        Update-PickerFrames
+        Update-PickerSlots
+    })
+
+    $btnApply.Add_Click({
+        $missing = @($state.Frames | Where-Object { @($_.Slots | Where-Object { -not $_ }).Count -gt 0 } | ForEach-Object { $_.Label })
+        if ($missing.Count -gt 0) {
+            $answer = [System.Windows.Forms.MessageBox]::Show(
+                "These frames still have empty slots:`n$($missing -join "`n")`n`nEmpty slots stay blank in the image. Continue?",
+                "Empty slots",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo)
+            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+                return
+            }
+        }
+
+        for ($f = 0; $f -lt $details.Count; $f++) {
+            $images = @()
+            foreach ($fileName in @($state.Frames[$f].Slots | Where-Object { $_ })) {
+                $old = $imageInfo[($fileName -replace '_[^\\/]*(?=\.[^\\/.]+$)', '')]
+                $images += [ordered]@{
+                    fileName = $fileName
+                    rotate = if ($null -ne $old -and $null -ne $old.rotate) { [decimal]$old.rotate } else { 0.0 }
+                    flip = if ($null -ne $old -and $null -ne $old.flip) { [int]$old.flip } else { 0 }
+                    isDigitalBackground = if ($null -ne $old -and $null -ne $old.isDigitalBackground) { [bool]$old.isDigitalBackground } else { $false }
+                    digitalBackgroundId = if ($null -ne $old -and $null -ne $old.digitalBackgroundId) { [int]$old.digitalBackgroundId } else { 0 }
+                }
+            }
+            $details[$f].listImages = $images
+        }
+
+        # Transaction photos = photos of frame 1 (same as the FE)
+        $body.listImages = $details[0].listImages
+        $body.photoPackageDetails = $details
+        $state.Result = $body | ConvertTo-Json -Depth 20
+        $pickerForm.Close()
+    })
+
+    $btnCancelPicker.Add_Click({
+        $pickerForm.Close()
+    })
+
+    $pickerForm.Add_Shown({
+        Update-PickerFrames
+        Show-PickerTab
+        Update-PickerSlots
+        Update-PickerPreview
+    })
+
+    [void]$pickerForm.ShowDialog()
+
+    foreach ($flow in $photoPanels) {
+        foreach ($box in $flow.Controls) {
+            foreach ($control in $box.Controls) {
+                if ($control -is [System.Windows.Forms.PictureBox] -and $null -ne $control.Image) {
+                    $control.Image.Dispose()
+                }
+            }
+        }
+    }
+    $pickerForm.Dispose()
+
+    return $state.Result
+}
+
 function Show-SelfBoothJsonPopup {
     param(
         [string]$transactionId,
@@ -1205,6 +1598,26 @@ function Show-SelfBoothJsonPopup {
 
         $btnSbRemoveFilter.Add_Click({
             $txtSbJson.Text = Remove-ImageFilterSuffix -json $txtSbJson.Text
+        })
+
+        $btnSbChoosePhotos = New-Object System.Windows.Forms.Button
+        $btnSbChoosePhotos.Text = "Choose photos"
+        $btnSbChoosePhotos.Location = New-Object System.Drawing.Point(165, 665)
+        $btnSbChoosePhotos.Size = New-Object System.Drawing.Size(160, 38)
+        $sbForm.Controls.Add($btnSbChoosePhotos)
+
+        $btnSbChoosePhotos.Add_Click({
+            try {
+                $null = $txtSbJson.Text | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show("JSON is invalid: $($_.Exception.Message)", "Invalid JSON")
+                return
+            }
+
+            $newJson = Show-PhotoPickerPopup -transactionId $transactionId -json $txtSbJson.Text
+            if ($newJson) {
+                $txtSbJson.Text = $newJson
+            }
         })
     }
 
