@@ -1,4 +1,4 @@
-Add-Type -AssemblyName System.Windows.Forms
+﻿Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # Load SQLite DLL manually from local file
@@ -692,7 +692,8 @@ LIMIT 1
 
             if ($null -ne $parsedImages) {
                 foreach ($img in @($parsedImages)) {
-                    $flipValue = 0
+                    # flip null = no flip; BE FlipType: 0 = Horizontal (mirror), 1 = Vertical
+                    $flipValue = $null
                     if ($img.PSObject.Properties.Name -contains "flip") {
                         if ($null -ne $img.flip -and $img.flip -ne '') {
                             $flipValue = [int]$img.flip
@@ -1078,7 +1079,7 @@ function Get-SelfBoothProcessJson {
                 $frameImages += [ordered]@{
                     fileName = $fileName
                     rotate = 0.0
-                    flip = 0
+                    flip = $null
                     isDigitalBackground = $false
                     digitalBackgroundId = 0
                 }
@@ -1220,55 +1221,109 @@ function Get-LayoutPictureCount {
     return [int]$cmd.ExecuteScalar()
 }
 
-function Add-PhotoThumbnails {
+function Get-LayoutPreviewInfo {
     param(
-        $panel,
-        [string]$folder,
-        [string[]]$fileNames
+        [int]$layoutId,
+        [int]$themeDetailId
     )
 
-    $panel.SuspendLayout()
-    foreach ($fileName in $fileNames) {
-        $box = New-Object System.Windows.Forms.Panel
-        $box.Size = New-Object System.Drawing.Size(176, 206)
-        $box.Padding = New-Object System.Windows.Forms.Padding(3)
-        $box.Tag = $fileName
-        $box.Cursor = [System.Windows.Forms.Cursors]::Hand
-
-        $pictureBox = New-Object System.Windows.Forms.PictureBox
-        $pictureBox.Location = New-Object System.Drawing.Point(3, 3)
-        $pictureBox.Size = New-Object System.Drawing.Size(170, 170)
-        $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-        $pictureBox.Tag = $fileName
-
-        # Small thumbnail from a stream so the photo file is not locked
-        $stream = [System.IO.File]::OpenRead((Join-Path $folder $fileName))
-        try {
-            $img = [System.Drawing.Image]::FromStream($stream, $false, $false)
-            $ratio = [Math]::Min(170.0 / $img.Width, 170.0 / $img.Height)
-            $pictureBox.Image = New-Object System.Drawing.Bitmap($img, [int]([Math]::Max(1, $img.Width * $ratio)), [int]([Math]::Max(1, $img.Height * $ratio)))
-            $img.Dispose()
-        } catch {
-        } finally {
-            $stream.Close()
-        }
-        $box.Controls.Add($pictureBox)
-
-        $lblName = New-Object System.Windows.Forms.Label
-        $lblName.Text = $fileName
-        $lblName.Location = New-Object System.Drawing.Point(3, 176)
-        $lblName.Size = New-Object System.Drawing.Size(170, 25)
-        $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 8)
-        $lblName.Tag = $fileName
-        $box.Controls.Add($lblName)
-
-        foreach ($control in @($box, $pictureBox, $lblName)) {
-            $control.Add_Click({ Select-PickerPhoto -fileName ([string]$this.Tag) })
-        }
-
-        $panel.Controls.Add($box)
+    $info = @{
+        Width = 0
+        Height = 0
+        Pictures = @()
+        ThemePath = ""
     }
-    $panel.ResumeLayout()
+
+    $cmd = $global:SQLiteConnection.CreateCommand()
+    $cmd.CommandText = "SELECT IFNULL(Width, 0), IFNULL(Height, 0) FROM Layouts WHERE Id = @layoutId LIMIT 1"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layoutId", $layoutId))) | Out-Null
+    $reader = $cmd.ExecuteReader()
+    if ($reader.Read()) {
+        $info.Width = [int]$reader.GetValue(0)
+        $info.Height = [int]$reader.GetValue(1)
+    }
+    $reader.Close()
+
+    # Same order as BE (LayoutPictures ORDER BY OrderNo)
+    $cmd = $global:SQLiteConnection.CreateCommand()
+    $cmd.CommandText = "SELECT IFNULL(AxisX, 0), IFNULL(AxisY, 0), IFNULL(Width, 0), IFNULL(Height, 0) FROM LayoutPictures WHERE LayoutId = @layoutId ORDER BY OrderNo, Id"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@layoutId", $layoutId))) | Out-Null
+    $reader = $cmd.ExecuteReader()
+    $pictures = @()
+    while ($reader.Read()) {
+        $pictures += ,@([int]$reader.GetValue(0), [int]$reader.GetValue(1), [int]$reader.GetValue(2), [int]$reader.GetValue(3))
+    }
+    $reader.Close()
+    $info.Pictures = $pictures
+
+    # Theme frame = FolderPhotoBooth + LayoutThemes.ImageUrl
+    $cmd = $global:SQLiteConnection.CreateCommand()
+    $cmd.CommandText = "SELECT ImageUrl FROM LayoutThemes WHERE Id = @id LIMIT 1"
+    $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@id", $themeDetailId))) | Out-Null
+    $imageUrl = $cmd.ExecuteScalar()
+    if ($null -ne $imageUrl -and $imageUrl -ne [DBNull]::Value -and -not [string]::IsNullOrWhiteSpace([string]$imageUrl)) {
+        $info.ThemePath = "D:\Work\PhotoBooth" + ([string]$imageUrl -replace '/', '\')
+    }
+
+    return $info
+}
+
+function Get-PhotoBaseName {
+    param(
+        [string]$fileName
+    )
+
+    # 134393938321887466_f35.png -> 134393938321887466.png
+    return ($fileName -replace '_[^\\/]*(?=\.[^\\/.]+$)', '')
+}
+
+function Get-RotatedBitmap {
+    param(
+        $source,
+        [int]$rotate,
+        $flip
+    )
+
+    # Same order as BE GetAndRotateImage: rotate, then flip (0 = Horizontal, 1 = Vertical, null = none)
+    $bitmap = New-Object System.Drawing.Bitmap($source)
+    switch ((($rotate % 360) + 360) % 360) {
+        90 { $bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate90FlipNone) }
+        180 { $bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate180FlipNone) }
+        270 { $bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate270FlipNone) }
+    }
+    if ($null -ne $flip -and "$flip" -ne "") {
+        if ([int]$flip -eq 1) {
+            $bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipY)
+        } else {
+            $bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipX)
+        }
+    }
+    return $bitmap
+}
+
+function Get-ScaledBitmapFromFile {
+    param(
+        [string]$path,
+        [int]$maxSize
+    )
+
+    if (-not (Test-Path $path)) {
+        return $null
+    }
+
+    # Read through a stream so the file is not locked
+    $stream = [System.IO.File]::OpenRead($path)
+    try {
+        $img = [System.Drawing.Image]::FromStream($stream, $false, $false)
+        $ratio = [Math]::Min(1.0, $maxSize / [double][Math]::Max($img.Width, $img.Height))
+        $bitmap = New-Object System.Drawing.Bitmap($img, [int][Math]::Max(1, $img.Width * $ratio), [int][Math]::Max(1, $img.Height * $ratio))
+        $img.Dispose()
+        return $bitmap
+    } catch {
+        return $null
+    } finally {
+        $stream.Close()
+    }
 }
 
 function Show-PhotoPickerPopup {
@@ -1280,13 +1335,13 @@ function Show-PhotoPickerPopup {
     $body = $json | ConvertFrom-Json
     $details = @($body.photoPackageDetails)
     if ($details.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No photoPackageDetails in JSON!", "Error")
+        [System.Windows.Forms.MessageBox]::Show("JSON không có photoPackageDetails!", "Lỗi")
         return $null
     }
 
     $folder = "D:\Work\PhotoBooth\Image\$transactionId"
     if (-not (Test-Path $folder)) {
-        [System.Windows.Forms.MessageBox]::Show("Folder not found:`n$folder", "Error")
+        [System.Windows.Forms.MessageBox]::Show("Không thấy thư mục:`n$folder", "Lỗi")
         return $null
     }
 
@@ -1296,11 +1351,11 @@ function Show-PhotoPickerPopup {
     $smoothFiles = @($allFiles | Where-Object { $_ -match '^\d+_f1\.(png|jpg|jpeg)$' })
     $filterFiles = @($allFiles | Where-Object { $_ -match '^\d+_f[^\\/]+\.(png|jpg|jpeg)$' -and $_ -notmatch '^\d+_f1\.(png|jpg|jpeg)$' })
 
-    # Keep rotate / flip / digital background of photos already in the JSON (by original photo, any version)
+    # Photo info already in the JSON (by original photo, any version)
     $imageInfo = @{}
     foreach ($image in @($body.listImages) + @($details | ForEach-Object { @($_.listImages) })) {
         if ($null -ne $image -and $null -ne $image.fileName) {
-            $key = ([string]$image.fileName) -replace '_[^\\/]*(?=\.[^\\/.]+$)', ''
+            $key = Get-PhotoBaseName -fileName ([string]$image.fileName)
             if (-not $imageInfo.ContainsKey($key)) {
                 $imageInfo[$key] = $image
             }
@@ -1312,12 +1367,27 @@ function Show-PhotoPickerPopup {
         Frame = 0
         Slot = 0
         Result = $null
+        Edits = @{}
+        Photos = @{}
+        Thumbs = New-Object System.Collections.ArrayList
+        PreviewScale = 1.0
+        Updating = $false
+    }
+
+    # Rotate / flip are kept per original photo (like the FE)
+    foreach ($key in @($imageInfo.Keys)) {
+        $old = $imageInfo[$key]
+        $state.Edits[$key] = @{
+            Rotate = if ($null -ne $old.rotate) { [int]$old.rotate } else { 0 }
+            Flip = if ($null -ne $old.flip -and "$($old.flip)" -ne "") { [int]$old.flip } else { $null }
+        }
     }
 
     $number = 1
     foreach ($detail in $details) {
-        $need = Get-LayoutPictureCount -layoutId ([int]$detail.LayoutId)
+        $preview = Get-LayoutPreviewInfo -layoutId ([int]$detail.LayoutId) -themeDetailId ([int]$detail.themeDetailId)
         $current = @(@($detail.listImages) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_.fileName })
+        $need = @($preview.Pictures).Count
         if ($need -le 0) {
             $need = [Math]::Max(1, $current.Count)
         }
@@ -1329,69 +1399,66 @@ function Show-PhotoPickerPopup {
 
         $type = if ([int]$detail.frameId -eq 1) { "2x6" } else { "4x6" }
         [void]$state.Frames.Add(@{
-            Label = "#$number $type layout $($detail.LayoutId)"
+            Label = "Khung $number - $type - layout $($detail.LayoutId)"
             Slots = $slots
+            Preview = $preview
+            Theme = $null
         })
         $number++
     }
 
+    $pink = [System.Drawing.Color]::FromArgb(240, 128, 150)
+
     $pickerForm = New-Object System.Windows.Forms.Form
-    $pickerForm.Text = "Choose photos - $transactionId"
-    $pickerForm.Size = New-Object System.Drawing.Size(1400, 860)
+    $pickerForm.Text = "Chọn ảnh - $transactionId"
+    $pickerForm.Size = New-Object System.Drawing.Size(1400, 880)
     $pickerForm.StartPosition = "CenterParent"
     $pickerForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
     $pickerForm.ShowInTaskbar = $false
 
-    $lblFrames = New-Object System.Windows.Forms.Label
-    $lblFrames.Text = "Frames"
-    $lblFrames.Location = New-Object System.Drawing.Point(10, 10)
-    $lblFrames.Size = New-Object System.Drawing.Size(340, 22)
-    $pickerForm.Controls.Add($lblFrames)
+    $cboFrames = New-Object System.Windows.Forms.ComboBox
+    $cboFrames.DropDownStyle = "DropDownList"
+    $cboFrames.Location = New-Object System.Drawing.Point(10, 10)
+    $cboFrames.Size = New-Object System.Drawing.Size(440, 30)
+    $cboFrames.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $pickerForm.Controls.Add($cboFrames)
 
-    $lstFrames = New-Object System.Windows.Forms.ListBox
-    $lstFrames.Location = New-Object System.Drawing.Point(10, 35)
-    $lstFrames.Size = New-Object System.Drawing.Size(340, 110)
-    $pickerForm.Controls.Add($lstFrames)
+    $previewBox = New-Object System.Windows.Forms.PictureBox
+    $previewBox.Location = New-Object System.Drawing.Point(10, 48)
+    $previewBox.Size = New-Object System.Drawing.Size(440, 680)
+    $previewBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+    $previewBox.BackColor = [System.Drawing.Color]::FromArgb(40, 34, 40)
+    $previewBox.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $pickerForm.Controls.Add($previewBox)
 
-    $lblSlots = New-Object System.Windows.Forms.Label
-    $lblSlots.Text = "Photos of the frame (select a slot, then click a photo)"
-    $lblSlots.Location = New-Object System.Drawing.Point(10, 150)
-    $lblSlots.Size = New-Object System.Drawing.Size(340, 22)
-    $pickerForm.Controls.Add($lblSlots)
-
-    $lstSlots = New-Object System.Windows.Forms.ListBox
-    $lstSlots.Location = New-Object System.Drawing.Point(10, 175)
-    $lstSlots.Size = New-Object System.Drawing.Size(340, 230)
-    $pickerForm.Controls.Add($lstSlots)
+    $lblSlotInfo = New-Object System.Windows.Forms.Label
+    $lblSlotInfo.Location = New-Object System.Drawing.Point(10, 732)
+    $lblSlotInfo.Size = New-Object System.Drawing.Size(440, 30)
+    $pickerForm.Controls.Add($lblSlotInfo)
 
     $btnClearSlot = New-Object System.Windows.Forms.Button
-    $btnClearSlot.Text = "Clear slot"
-    $btnClearSlot.Location = New-Object System.Drawing.Point(10, 410)
-    $btnClearSlot.Size = New-Object System.Drawing.Size(165, 35)
+    $btnClearSlot.Text = "Xoá ô"
+    $btnClearSlot.Location = New-Object System.Drawing.Point(10, 768)
+    $btnClearSlot.Size = New-Object System.Drawing.Size(140, 38)
     $pickerForm.Controls.Add($btnClearSlot)
 
     $btnClearFrame = New-Object System.Windows.Forms.Button
-    $btnClearFrame.Text = "Clear frame"
-    $btnClearFrame.Location = New-Object System.Drawing.Point(185, 410)
-    $btnClearFrame.Size = New-Object System.Drawing.Size(165, 35)
+    $btnClearFrame.Text = "Xoá cả khung"
+    $btnClearFrame.Location = New-Object System.Drawing.Point(160, 768)
+    $btnClearFrame.Size = New-Object System.Drawing.Size(140, 38)
     $pickerForm.Controls.Add($btnClearFrame)
 
-    $previewBox = New-Object System.Windows.Forms.PictureBox
-    $previewBox.Location = New-Object System.Drawing.Point(10, 455)
-    $previewBox.Size = New-Object System.Drawing.Size(340, 300)
-    $previewBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-    $previewBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $pickerForm.Controls.Add($previewBox)
-
     $tabs = New-Object System.Windows.Forms.TabControl
-    $tabs.Location = New-Object System.Drawing.Point(360, 10)
-    $tabs.Size = New-Object System.Drawing.Size(1015, 745)
+    $tabs.Location = New-Object System.Drawing.Point(465, 10)
+    $tabs.Size = New-Object System.Drawing.Size(910, 700)
+    $tabs.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $pickerForm.Controls.Add($tabs)
 
+    # Same order as the FE
     $tabDefs = @(
-        @{ Title = "Original ($($originalFiles.Count))"; Files = $originalFiles },
-        @{ Title = "Filter ($($filterFiles.Count))"; Files = $filterFiles },
-        @{ Title = "Smooth ($($smoothFiles.Count))"; Files = $smoothFiles }
+        @{ Title = "Ảnh filter ($($filterFiles.Count))"; Files = $filterFiles },
+        @{ Title = "Ảnh mịn da ($($smoothFiles.Count))"; Files = $smoothFiles },
+        @{ Title = "Ảnh gốc ($($originalFiles.Count))"; Files = $originalFiles }
     )
     $photoPanels = @()
     foreach ($def in $tabDefs) {
@@ -1406,77 +1473,264 @@ function Show-PhotoPickerPopup {
         $photoPanels += $flow
     }
 
+    $btnFlipAll = New-Object System.Windows.Forms.Button
+    $btnFlipAll.Text = "Lật toàn bộ ảnh"
+    $btnFlipAll.Location = New-Object System.Drawing.Point(465, 720)
+    $btnFlipAll.Size = New-Object System.Drawing.Size(200, 38)
+    $pickerForm.Controls.Add($btnFlipAll)
+
+    $lblHelp = New-Object System.Windows.Forms.Label
+    $lblHelp.Text = "Bấm ảnh để gắn vào ô đang chọn (bấm lại để bỏ). Bấm vào ô trên khung để chọn ô."
+    $lblHelp.Location = New-Object System.Drawing.Point(680, 728)
+    $lblHelp.Size = New-Object System.Drawing.Size(695, 25)
+    $pickerForm.Controls.Add($lblHelp)
+
     $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Apply"
+    $btnApply.Text = "Áp dụng"
     $btnApply.Location = New-Object System.Drawing.Point(1080, 768)
     $btnApply.Size = New-Object System.Drawing.Size(140, 38)
+    $btnApply.BackColor = $pink
+    $btnApply.ForeColor = [System.Drawing.Color]::White
+    $btnApply.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $pickerForm.Controls.Add($btnApply)
 
     $btnCancelPicker = New-Object System.Windows.Forms.Button
-    $btnCancelPicker.Text = "Cancel"
+    $btnCancelPicker.Text = "Huỷ"
     $btnCancelPicker.Location = New-Object System.Drawing.Point(1235, 768)
     $btnCancelPicker.Size = New-Object System.Drawing.Size(140, 38)
     $pickerForm.Controls.Add($btnCancelPicker)
 
-    function Update-PickerFrames {
-        $lstFrames.BeginUpdate()
-        $lstFrames.Items.Clear()
-        foreach ($frame in $state.Frames) {
-            $filled = @($frame.Slots | Where-Object { $_ }).Count
-            [void]$lstFrames.Items.Add("$($frame.Label) ($filled/$($frame.Slots.Count) photos)")
+    function Get-PhotoEdit {
+        param([string]$fileName)
+
+        $key = Get-PhotoBaseName -fileName $fileName
+        if (-not $state.Edits.ContainsKey($key)) {
+            $state.Edits[$key] = @{ Rotate = 0; Flip = $null }
         }
-        $lstFrames.EndUpdate()
-        $lstFrames.SelectedIndex = $state.Frame
+        return $state.Edits[$key]
     }
 
-    function Update-PickerSlots {
-        $frame = $state.Frames[$state.Frame]
-        $lstSlots.BeginUpdate()
-        $lstSlots.Items.Clear()
-        for ($i = 0; $i -lt $frame.Slots.Count; $i++) {
-            $name = if ($frame.Slots[$i]) { $frame.Slots[$i] } else { "(empty)" }
-            [void]$lstSlots.Items.Add("Slot $($i + 1): $name")
-        }
-        $lstSlots.EndUpdate()
-        if ($frame.Slots.Count -gt 0) {
-            $lstSlots.SelectedIndex = [Math]::Min($state.Slot, $frame.Slots.Count - 1)
-        }
+    function Get-PreviewPhoto {
+        param([string]$fileName)
 
-        # Photos used in the current frame are highlighted
-        foreach ($flow in $photoPanels) {
-            foreach ($box in $flow.Controls) {
-                $box.BackColor = if ($frame.Slots -contains $box.Tag) { [System.Drawing.Color]::LightGreen } else { [System.Drawing.SystemColors]::Control }
-            }
+        if (-not $state.Photos.ContainsKey($fileName)) {
+            $state.Photos[$fileName] = Get-ScaledBitmapFromFile -path (Join-Path $folder $fileName) -maxSize 900
         }
+        return $state.Photos[$fileName]
+    }
+
+    function Update-ThumbImage {
+        param($thumb)
+
+        $edit = Get-PhotoEdit -fileName $thumb.FileName
+        $old = $thumb.Picture.Image
+        $thumb.Picture.Image = Get-RotatedBitmap -source $thumb.Thumb -rotate $edit.Rotate -flip $edit.Flip
+        if ($null -ne $old) {
+            $old.Dispose()
+        }
+    }
+
+    function Add-PickerThumbnails {
+        param($panel)
+
+        $panel.SuspendLayout()
+        foreach ($fileName in $panel.Tag.Files) {
+            $box = New-Object System.Windows.Forms.Panel
+            $box.Size = New-Object System.Drawing.Size(210, 205)
+            $box.Tag = $fileName
+            $box.Cursor = [System.Windows.Forms.Cursors]::Hand
+
+            $pictureBox = New-Object System.Windows.Forms.PictureBox
+            $pictureBox.Location = New-Object System.Drawing.Point(5, 5)
+            $pictureBox.Size = New-Object System.Drawing.Size(200, 150)
+            $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+            $pictureBox.Tag = $fileName
+            $box.Controls.Add($pictureBox)
+
+            # Slot number(s) of the photo in the current frame, like the FE
+            $badge = New-Object System.Windows.Forms.Label
+            $badge.AutoSize = $true
+            $badge.Location = New-Object System.Drawing.Point(4, 4)
+            $badge.BackColor = $pink
+            $badge.ForeColor = [System.Drawing.Color]::White
+            $badge.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+            $badge.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 0)
+            $badge.Visible = $false
+            $badge.Tag = $fileName
+            $pictureBox.Controls.Add($badge)
+
+            $btnRotate = New-Object System.Windows.Forms.Button
+            $btnRotate.Text = "Xoay"
+            $btnRotate.Location = New-Object System.Drawing.Point(5, 160)
+            $btnRotate.Size = New-Object System.Drawing.Size(60, 40)
+            $btnRotate.Tag = $fileName
+            $btnRotate.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+            $box.Controls.Add($btnRotate)
+
+            $btnFlip = New-Object System.Windows.Forms.Button
+            $btnFlip.Text = "Lật"
+            $btnFlip.Location = New-Object System.Drawing.Point(70, 160)
+            $btnFlip.Size = New-Object System.Drawing.Size(55, 40)
+            $btnFlip.Tag = $fileName
+            $btnFlip.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+            $box.Controls.Add($btnFlip)
+
+            $lblName = New-Object System.Windows.Forms.Label
+            $lblName.Text = $fileName
+            $lblName.Location = New-Object System.Drawing.Point(128, 160)
+            $lblName.Size = New-Object System.Drawing.Size(80, 42)
+            $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 7)
+            $lblName.Tag = $fileName
+            $box.Controls.Add($lblName)
+
+            foreach ($control in @($box, $pictureBox, $badge, $lblName)) {
+                $control.Add_Click({ Select-PickerPhoto -fileName ([string]$this.Tag) })
+            }
+            $btnRotate.Add_Click({ Set-PickerPhotoEdit -fileName ([string]$this.Tag) -rotate })
+            $btnFlip.Add_Click({ Set-PickerPhotoEdit -fileName ([string]$this.Tag) -flip })
+
+            $thumb = @{
+                FileName = $fileName
+                Box = $box
+                Picture = $pictureBox
+                Badge = $badge
+                Thumb = Get-ScaledBitmapFromFile -path (Join-Path $folder $fileName) -maxSize 220
+            }
+            if ($null -ne $thumb.Thumb) {
+                Update-ThumbImage -thumb $thumb
+            }
+            [void]$state.Thumbs.Add($thumb)
+            $panel.Controls.Add($box)
+        }
+        $panel.ResumeLayout()
     }
 
     function Update-PickerPreview {
+        $frame = $state.Frames[$state.Frame]
+        $info = $frame.Preview
         $old = $previewBox.Image
         $previewBox.Image = $null
         if ($null -ne $old) {
             $old.Dispose()
         }
 
-        $fileName = $state.Frames[$state.Frame].Slots[$state.Slot]
-        if (-not $fileName) {
+        if ($info.Width -le 0 -or $info.Height -le 0) {
             return
         }
 
-        $path = Join-Path $folder $fileName
-        if (-not (Test-Path $path)) {
-            return
+        $scale = [Math]::Min(1.0, 900.0 / [Math]::Max($info.Width, $info.Height))
+        $state.PreviewScale = $scale
+        $canvasWidth = [int]($info.Width * $scale)
+        $canvasHeight = [int]($info.Height * $scale)
+        $canvas = New-Object System.Drawing.Bitmap($canvasWidth, $canvasHeight)
+        $graphics = [System.Drawing.Graphics]::FromImage($canvas)
+        $graphics.Clear([System.Drawing.Color]::White)
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
+        $pictures = @($info.Pictures)
+        for ($i = 0; $i -lt $pictures.Count; $i++) {
+            $p = $pictures[$i]
+            $rect = New-Object System.Drawing.RectangleF(($p[0] * $scale), ($p[1] * $scale), ($p[2] * $scale), ($p[3] * $scale))
+            $fileName = if ($i -lt $frame.Slots.Count) { $frame.Slots[$i] } else { "" }
+            $source = if ($fileName) { Get-PreviewPhoto -fileName $fileName } else { $null }
+
+            if ($null -ne $source) {
+                $edit = Get-PhotoEdit -fileName $fileName
+                $photo = Get-RotatedBitmap -source $source -rotate $edit.Rotate -flip $edit.Flip
+                # Fill the slot and crop the center (preview only, BE crops by layout ratio)
+                $dstRatio = $rect.Width / $rect.Height
+                $srcRatio = $photo.Width / [double]$photo.Height
+                if ($srcRatio -gt $dstRatio) {
+                    $srcHeight = $photo.Height
+                    $srcWidth = $srcHeight * $dstRatio
+                } else {
+                    $srcWidth = $photo.Width
+                    $srcHeight = $srcWidth / $dstRatio
+                }
+                $srcRect = New-Object System.Drawing.RectangleF((($photo.Width - $srcWidth) / 2), (($photo.Height - $srcHeight) / 2), $srcWidth, $srcHeight)
+                $graphics.DrawImage($photo, $rect, $srcRect, [System.Drawing.GraphicsUnit]::Pixel)
+                $photo.Dispose()
+            } else {
+                $graphics.FillRectangle([System.Drawing.Brushes]::Gainsboro, $rect)
+            }
         }
 
-        $stream = [System.IO.File]::OpenRead($path)
-        try {
-            $img = [System.Drawing.Image]::FromStream($stream, $false, $false)
-            $ratio = [Math]::Min(340.0 / $img.Width, 300.0 / $img.Height)
-            $previewBox.Image = New-Object System.Drawing.Bitmap($img, [int]([Math]::Max(1, $img.Width * $ratio)), [int]([Math]::Max(1, $img.Height * $ratio)))
-            $img.Dispose()
-        } catch {
-        } finally {
-            $stream.Close()
+        # Theme frame on top
+        if ($null -eq $frame.Theme -and $info.ThemePath) {
+            $themeSource = Get-ScaledBitmapFromFile -path $info.ThemePath -maxSize 1200
+            if ($null -ne $themeSource) {
+                $frame.Theme = New-Object System.Drawing.Bitmap($themeSource, $canvasWidth, $canvasHeight)
+                $themeSource.Dispose()
+            }
         }
+        if ($null -ne $frame.Theme) {
+            $graphics.DrawImage($frame.Theme, 0, 0, $canvasWidth, $canvasHeight)
+        }
+
+        # Slot numbers and selected slot
+        $badgeSize = [Math]::Max(22, [int]($canvasWidth / 14))
+        $badgeFont = New-Object System.Drawing.Font("Segoe UI", [float]($badgeSize * 0.45), [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+        $badgeBrush = New-Object System.Drawing.SolidBrush($pink)
+        $format = New-Object System.Drawing.StringFormat
+        $format.Alignment = [System.Drawing.StringAlignment]::Center
+        $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+        for ($i = 0; $i -lt $pictures.Count; $i++) {
+            $p = $pictures[$i]
+            $x = [float]($p[0] * $scale + 8)
+            $y = [float]($p[1] * $scale + 8)
+            $graphics.FillEllipse($badgeBrush, $x, $y, [float]$badgeSize, [float]$badgeSize)
+            $graphics.DrawString([string]($i + 1), $badgeFont, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF($x, $y, $badgeSize, $badgeSize)), $format)
+
+            if ($i -eq $state.Slot) {
+                $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, [float][Math]::Max(3, $canvasWidth / 120))
+                $graphics.DrawRectangle($pen, [float]($p[0] * $scale), [float]($p[1] * $scale), [float]($p[2] * $scale), [float]($p[3] * $scale))
+                $pen.Dispose()
+            }
+        }
+        $format.Dispose()
+        $badgeFont.Dispose()
+        $badgeBrush.Dispose()
+        $graphics.Dispose()
+
+        $previewBox.Image = $canvas
+    }
+
+    function Update-Picker {
+        $state.Updating = $true
+        for ($f = 0; $f -lt $state.Frames.Count; $f++) {
+            $frame = $state.Frames[$f]
+            $filled = @($frame.Slots | Where-Object { $_ }).Count
+            $text = "$($frame.Label) ($filled/$($frame.Slots.Count) ảnh)"
+            if ($cboFrames.Items.Count -le $f) {
+                [void]$cboFrames.Items.Add($text)
+            } elseif ([string]$cboFrames.Items[$f] -ne $text) {
+                $cboFrames.Items[$f] = $text
+            }
+        }
+        if ($cboFrames.SelectedIndex -ne $state.Frame) {
+            $cboFrames.SelectedIndex = $state.Frame
+        }
+        $state.Updating = $false
+
+        $frame = $state.Frames[$state.Frame]
+        $current = if ($frame.Slots[$state.Slot]) { $frame.Slots[$state.Slot] } else { "(trống)" }
+        $lblSlotInfo.Text = "Ô đang chọn: $($state.Slot + 1) / $($frame.Slots.Count) - $current"
+
+        # Slot numbers on the photos of the current frame
+        foreach ($thumb in $state.Thumbs) {
+            $numbers = @()
+            for ($i = 0; $i -lt $frame.Slots.Count; $i++) {
+                if ($frame.Slots[$i] -eq $thumb.FileName) {
+                    $numbers += ($i + 1)
+                }
+            }
+            $thumb.Badge.Text = $numbers -join ","
+            $thumb.Badge.Visible = $numbers.Count -gt 0
+            $thumb.Box.BackColor = if ($numbers.Count -gt 0) { $pink } else { [System.Drawing.SystemColors]::Control }
+        }
+
+        Update-PickerPreview
     }
 
     function Select-PickerPhoto {
@@ -1487,39 +1741,93 @@ function Show-PhotoPickerPopup {
             return
         }
 
-        $frame.Slots[$state.Slot] = $fileName
-        # Move to the next slot like the FE
-        if ($state.Slot -lt $frame.Slots.Count - 1) {
-            $state.Slot++
+        $index = $frame.Slots.IndexOf($fileName)
+        if ($index -ge 0) {
+            # Click again = remove the photo, like the FE
+            $frame.Slots[$index] = ""
+            $state.Slot = $index
+        } else {
+            $frame.Slots[$state.Slot] = $fileName
+            # Go to the next empty slot
+            for ($step = 1; $step -le $frame.Slots.Count; $step++) {
+                $next = ($state.Slot + $step) % $frame.Slots.Count
+                if (-not $frame.Slots[$next]) {
+                    $state.Slot = $next
+                    break
+                }
+            }
         }
 
-        Update-PickerFrames
-        Update-PickerSlots
+        Update-Picker
+    }
+
+    function Set-PickerPhotoEdit {
+        param(
+            [string]$fileName,
+            [switch]$rotate,
+            [switch]$flip
+        )
+
+        $edit = Get-PhotoEdit -fileName $fileName
+        if ($rotate) {
+            $edit.Rotate = ($edit.Rotate + 90) % 360
+        }
+        if ($flip) {
+            $edit.Flip = if ($null -eq $edit.Flip) { 0 } else { $null }
+        }
+
+        # Every version (original / filter / smooth) of the same photo
+        $key = Get-PhotoBaseName -fileName $fileName
+        foreach ($thumb in $state.Thumbs) {
+            if ((Get-PhotoBaseName -fileName $thumb.FileName) -eq $key -and $null -ne $thumb.Thumb) {
+                Update-ThumbImage -thumb $thumb
+            }
+        }
+        Update-PickerPreview
     }
 
     function Show-PickerTab {
         $flow = $photoPanels[$tabs.SelectedIndex]
         if (-not $flow.Tag.Loaded) {
             $pickerForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-            Add-PhotoThumbnails -panel $flow -folder $folder -fileNames $flow.Tag.Files
+            Add-PickerThumbnails -panel $flow
             $flow.Tag.Loaded = $true
             $pickerForm.Cursor = [System.Windows.Forms.Cursors]::Default
-            Update-PickerSlots
+            Update-Picker
         }
     }
 
-    $lstFrames.Add_SelectedIndexChanged({
-        if ($lstFrames.SelectedIndex -ge 0 -and $lstFrames.SelectedIndex -ne $state.Frame) {
-            $state.Frame = $lstFrames.SelectedIndex
-            $state.Slot = 0
-            Update-PickerSlots
+    $cboFrames.Add_SelectedIndexChanged({
+        if (-not $state.Updating -and $cboFrames.SelectedIndex -ge 0 -and $cboFrames.SelectedIndex -ne $state.Frame) {
+            $state.Frame = $cboFrames.SelectedIndex
+            $state.Slot = [Math]::Max(0, $state.Frames[$state.Frame].Slots.IndexOf(""))
+            Update-Picker
         }
     })
 
-    $lstSlots.Add_SelectedIndexChanged({
-        if ($lstSlots.SelectedIndex -ge 0) {
-            $state.Slot = $lstSlots.SelectedIndex
-            Update-PickerPreview
+    # Click a slot on the frame preview to select it
+    $previewBox.Add_MouseClick({
+        param($sender, $e)
+
+        $img = $previewBox.Image
+        if ($null -eq $img) {
+            return
+        }
+
+        $ratio = [Math]::Min($previewBox.ClientSize.Width / [double]$img.Width, $previewBox.ClientSize.Height / [double]$img.Height)
+        $offsetX = ($previewBox.ClientSize.Width - $img.Width * $ratio) / 2
+        $offsetY = ($previewBox.ClientSize.Height - $img.Height * $ratio) / 2
+        $x = ($e.X - $offsetX) / $ratio / $state.PreviewScale
+        $y = ($e.Y - $offsetY) / $ratio / $state.PreviewScale
+
+        $pictures = @($state.Frames[$state.Frame].Preview.Pictures)
+        for ($i = 0; $i -lt $pictures.Count; $i++) {
+            $p = $pictures[$i]
+            if ($x -ge $p[0] -and $x -le ($p[0] + $p[2]) -and $y -ge $p[1] -and $y -le ($p[1] + $p[3])) {
+                $state.Slot = $i
+                Update-Picker
+                break
+            }
         }
     })
 
@@ -1527,8 +1835,7 @@ function Show-PhotoPickerPopup {
 
     $btnClearSlot.Add_Click({
         $state.Frames[$state.Frame].Slots[$state.Slot] = ""
-        Update-PickerFrames
-        Update-PickerSlots
+        Update-Picker
     })
 
     $btnClearFrame.Add_Click({
@@ -1537,16 +1844,31 @@ function Show-PhotoPickerPopup {
             $frame.Slots[$i] = ""
         }
         $state.Slot = 0
-        Update-PickerFrames
-        Update-PickerSlots
+        Update-Picker
+    })
+
+    # Flip all photos: if any photo is not flipped, flip all; otherwise un-flip all
+    $btnFlipAll.Add_Click({
+        $bases = @(@($state.Thumbs | ForEach-Object { Get-PhotoBaseName -fileName $_.FileName }) +
+            @($state.Frames | ForEach-Object { @($_.Slots | Where-Object { $_ } | ForEach-Object { Get-PhotoBaseName -fileName $_ }) }) | Select-Object -Unique)
+        $anyNotFlipped = @($bases | Where-Object { $null -eq (Get-PhotoEdit -fileName $_).Flip }).Count -gt 0
+        foreach ($key in $bases) {
+            (Get-PhotoEdit -fileName $key).Flip = if ($anyNotFlipped) { 0 } else { $null }
+        }
+        foreach ($thumb in $state.Thumbs) {
+            if ($null -ne $thumb.Thumb) {
+                Update-ThumbImage -thumb $thumb
+            }
+        }
+        Update-PickerPreview
     })
 
     $btnApply.Add_Click({
         $missing = @($state.Frames | Where-Object { @($_.Slots | Where-Object { -not $_ }).Count -gt 0 } | ForEach-Object { $_.Label })
         if ($missing.Count -gt 0) {
             $answer = [System.Windows.Forms.MessageBox]::Show(
-                "These frames still have empty slots:`n$($missing -join "`n")`n`nEmpty slots stay blank in the image. Continue?",
-                "Empty slots",
+                "Các khung còn ô trống:`n$($missing -join "`n")`n`nÔ trống sẽ để trắng trên ảnh. Vẫn áp dụng?",
+                "Còn ô trống",
                 [System.Windows.Forms.MessageBoxButtons]::YesNo)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
                 return
@@ -1556,11 +1878,12 @@ function Show-PhotoPickerPopup {
         for ($f = 0; $f -lt $details.Count; $f++) {
             $images = @()
             foreach ($fileName in @($state.Frames[$f].Slots | Where-Object { $_ })) {
-                $old = $imageInfo[($fileName -replace '_[^\\/]*(?=\.[^\\/.]+$)', '')]
+                $edit = Get-PhotoEdit -fileName $fileName
+                $old = $imageInfo[(Get-PhotoBaseName -fileName $fileName)]
                 $images += [ordered]@{
                     fileName = $fileName
-                    rotate = if ($null -ne $old -and $null -ne $old.rotate) { [decimal]$old.rotate } else { 0.0 }
-                    flip = if ($null -ne $old -and $null -ne $old.flip) { [int]$old.flip } else { 0 }
+                    rotate = [decimal]$edit.Rotate
+                    flip = $edit.Flip
                     isDigitalBackground = if ($null -ne $old -and $null -ne $old.isDigitalBackground) { [bool]$old.isDigitalBackground } else { $false }
                     digitalBackgroundId = if ($null -ne $old -and $null -ne $old.digitalBackgroundId) { [int]$old.digitalBackgroundId } else { 0 }
                 }
@@ -1580,23 +1903,25 @@ function Show-PhotoPickerPopup {
     })
 
     $pickerForm.Add_Shown({
-        Update-PickerFrames
+        $state.Slot = [Math]::Max(0, $state.Frames[0].Slots.IndexOf(""))
+        Update-Picker
         Show-PickerTab
-        Update-PickerSlots
-        Update-PickerPreview
     })
 
     [void]$pickerForm.ShowDialog()
 
-    foreach ($flow in $photoPanels) {
-        foreach ($box in $flow.Controls) {
-            foreach ($control in $box.Controls) {
-                if ($control -is [System.Windows.Forms.PictureBox] -and $null -ne $control.Image) {
-                    $control.Image.Dispose()
-                }
-            }
-        }
+    # Release bitmaps
+    foreach ($thumb in $state.Thumbs) {
+        if ($null -ne $thumb.Thumb) { $thumb.Thumb.Dispose() }
+        if ($null -ne $thumb.Picture.Image) { $thumb.Picture.Image.Dispose() }
     }
+    foreach ($bitmap in @($state.Photos.Values)) {
+        if ($null -ne $bitmap) { $bitmap.Dispose() }
+    }
+    foreach ($frame in $state.Frames) {
+        if ($null -ne $frame.Theme) { $frame.Theme.Dispose() }
+    }
+    if ($null -ne $previewBox.Image) { $previewBox.Image.Dispose() }
     $pickerForm.Dispose()
 
     return $state.Result
@@ -1844,9 +2169,9 @@ function Load-Transactions {
     $listView.Items.Clear()
     foreach ($row in @($rows | Select-Object -First $global:PageSize)) {
         $item = New-Object System.Windows.Forms.ListViewItem($row[0])
-        $item.SubItems.Add($row[1])
-        $item.SubItems.Add($row[2])
-        $item.SubItems.Add($row[3])
+        [void]$item.SubItems.Add($row[1])
+        [void]$item.SubItems.Add($row[2])
+        [void]$item.SubItems.Add($row[3])
         $listView.Items.Add($item) | Out-Null
     }
     $listView.EndUpdate()
