@@ -1326,6 +1326,51 @@ function Get-ScaledBitmapFromFile {
     }
 }
 
+function Set-RoundedRegion {
+    param(
+        $control,
+        [int]$radius
+    )
+
+    # Rounded corners for WinForms controls (no CSS in WinForms)
+    $diameter = [Math]::Min($radius * 2, [Math]::Min($control.Width, $control.Height))
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $path.AddArc(0, 0, $diameter, $diameter, 180, 90)
+    $path.AddArc($control.Width - $diameter, 0, $diameter, $diameter, 270, 90)
+    $path.AddArc($control.Width - $diameter, $control.Height - $diameter, $diameter, $diameter, 0, 90)
+    $path.AddArc(0, $control.Height - $diameter, $diameter, $diameter, 90, 90)
+    $path.CloseFigure()
+    $control.Region = New-Object System.Drawing.Region($path)
+    $path.Dispose()
+}
+
+function New-FlatButton {
+    param(
+        [string]$text,
+        [int]$x,
+        [int]$y,
+        [int]$width,
+        [int]$height,
+        $backColor,
+        $foreColor,
+        [float]$fontSize = 10,
+        [int]$radius = 12
+    )
+
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $text
+    $button.Location = New-Object System.Drawing.Point($x, $y)
+    $button.Size = New-Object System.Drawing.Size($width, $height)
+    $button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $button.FlatAppearance.BorderSize = 0
+    $button.BackColor = $backColor
+    $button.ForeColor = $foreColor
+    $button.Font = New-Object System.Drawing.Font("Segoe UI", $fontSize, [System.Drawing.FontStyle]::Bold)
+    $button.Cursor = [System.Windows.Forms.Cursors]::Hand
+    Set-RoundedRegion -control $button -radius $radius
+    return $button
+}
+
 function Show-PhotoPickerPopup {
     param(
         [string]$transactionId,
@@ -1407,52 +1452,76 @@ function Show-PhotoPickerPopup {
         $number++
     }
 
+    # Colors like the FE screen
     $pink = [System.Drawing.Color]::FromArgb(240, 128, 150)
+    $darkPink = [System.Drawing.Color]::FromArgb(150, 45, 80)
+    $darkBg = [System.Drawing.Color]::FromArgb(36, 29, 35)
+    $cardBg = [System.Drawing.Color]::FromArgb(58, 49, 56)
+    $pillBg = [System.Drawing.Color]::FromArgb(70, 70, 70)
+    $pillActive = [System.Drawing.Color]::FromArgb(15, 15, 15)
+    $softText = [System.Drawing.Color]::FromArgb(200, 190, 198)
+    $white = [System.Drawing.Color]::White
 
     $pickerForm = New-Object System.Windows.Forms.Form
     $pickerForm.Text = "Chọn ảnh - $transactionId"
-    $pickerForm.Size = New-Object System.Drawing.Size(1400, 880)
+    $pickerForm.Size = New-Object System.Drawing.Size(1400, 930)
     $pickerForm.StartPosition = "CenterParent"
     $pickerForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $pickerForm.BackColor = $darkBg
+    $pickerForm.ForeColor = $white
     $pickerForm.ShowInTaskbar = $false
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Text = "CHỌN ẢNH"
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $lblTitle.Location = New-Object System.Drawing.Point(0, 5)
+    $lblTitle.Size = New-Object System.Drawing.Size(1385, 55)
+    $pickerForm.Controls.Add($lblTitle)
 
     $cboFrames = New-Object System.Windows.Forms.ComboBox
     $cboFrames.DropDownStyle = "DropDownList"
-    $cboFrames.Location = New-Object System.Drawing.Point(10, 10)
-    $cboFrames.Size = New-Object System.Drawing.Size(440, 30)
+    $cboFrames.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $cboFrames.BackColor = $cardBg
+    $cboFrames.ForeColor = $white
+    $cboFrames.Location = New-Object System.Drawing.Point(20, 70)
+    $cboFrames.Size = New-Object System.Drawing.Size(420, 32)
     $cboFrames.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $pickerForm.Controls.Add($cboFrames)
 
     $previewBox = New-Object System.Windows.Forms.PictureBox
-    $previewBox.Location = New-Object System.Drawing.Point(10, 48)
-    $previewBox.Size = New-Object System.Drawing.Size(440, 680)
+    $previewBox.Location = New-Object System.Drawing.Point(20, 112)
+    $previewBox.Size = New-Object System.Drawing.Size(420, 640)
     $previewBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-    $previewBox.BackColor = [System.Drawing.Color]::FromArgb(40, 34, 40)
+    $previewBox.BackColor = $darkBg
     $previewBox.Cursor = [System.Windows.Forms.Cursors]::Hand
     $pickerForm.Controls.Add($previewBox)
 
     $lblSlotInfo = New-Object System.Windows.Forms.Label
-    $lblSlotInfo.Location = New-Object System.Drawing.Point(10, 732)
-    $lblSlotInfo.Size = New-Object System.Drawing.Size(440, 30)
+    $lblSlotInfo.Location = New-Object System.Drawing.Point(20, 760)
+    $lblSlotInfo.Size = New-Object System.Drawing.Size(420, 25)
+    $lblSlotInfo.ForeColor = $softText
     $pickerForm.Controls.Add($lblSlotInfo)
 
-    $btnClearSlot = New-Object System.Windows.Forms.Button
-    $btnClearSlot.Text = "Xoá ô"
-    $btnClearSlot.Location = New-Object System.Drawing.Point(10, 768)
-    $btnClearSlot.Size = New-Object System.Drawing.Size(140, 38)
+    $btnClearSlot = New-FlatButton -text "Xoá ô" -x 20 -y 795 -width 130 -height 40 -backColor $cardBg -foreColor $white
     $pickerForm.Controls.Add($btnClearSlot)
 
-    $btnClearFrame = New-Object System.Windows.Forms.Button
-    $btnClearFrame.Text = "Xoá cả khung"
-    $btnClearFrame.Location = New-Object System.Drawing.Point(160, 768)
-    $btnClearFrame.Size = New-Object System.Drawing.Size(140, 38)
+    $btnClearFrame = New-FlatButton -text "Xoá cả khung" -x 160 -y 795 -width 150 -height 40 -backColor $cardBg -foreColor $white
     $pickerForm.Controls.Add($btnClearFrame)
 
-    $tabs = New-Object System.Windows.Forms.TabControl
-    $tabs.Location = New-Object System.Drawing.Point(465, 10)
-    $tabs.Size = New-Object System.Drawing.Size(910, 700)
-    $tabs.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-    $pickerForm.Controls.Add($tabs)
+    # Pill tab bar like the FE: Ảnh filter / Ảnh mịn da / Ảnh gốc
+    $tabBar = New-Object System.Windows.Forms.Panel
+    $tabBar.Location = New-Object System.Drawing.Point(685, 70)
+    $tabBar.Size = New-Object System.Drawing.Size(480, 46)
+    $tabBar.BackColor = $pillBg
+    Set-RoundedRegion -control $tabBar -radius 22
+    $pickerForm.Controls.Add($tabBar)
+
+    $photoArea = New-Object System.Windows.Forms.Panel
+    $photoArea.Location = New-Object System.Drawing.Point(465, 130)
+    $photoArea.Size = New-Object System.Drawing.Size(910, 620)
+    $photoArea.BackColor = $darkBg
+    $pickerForm.Controls.Add($photoArea)
 
     # Same order as the FE
     $tabDefs = @(
@@ -1461,44 +1530,43 @@ function Show-PhotoPickerPopup {
         @{ Title = "Ảnh gốc ($($originalFiles.Count))"; Files = $originalFiles }
     )
     $photoPanels = @()
-    foreach ($def in $tabDefs) {
-        $page = New-Object System.Windows.Forms.TabPage
-        $page.Text = $def.Title
+    $tabButtons = @()
+    for ($t = 0; $t -lt $tabDefs.Count; $t++) {
         $flow = New-Object System.Windows.Forms.FlowLayoutPanel
         $flow.Dock = [System.Windows.Forms.DockStyle]::Fill
         $flow.AutoScroll = $true
-        $flow.Tag = @{ Files = $def.Files; Loaded = $false }
-        $page.Controls.Add($flow)
-        $tabs.TabPages.Add($page)
+        $flow.BackColor = $darkBg
+        $flow.Visible = $false
+        $flow.Tag = @{ Files = $tabDefs[$t].Files; Loaded = $false }
+        $photoArea.Controls.Add($flow)
         $photoPanels += $flow
+
+        $tabButton = New-FlatButton -text $tabDefs[$t].Title -x (4 + 158 * $t) -y 4 -width 154 -height 38 -backColor $pillBg -foreColor $white -fontSize 10.5 -radius 19
+        $tabButton.Tag = $t
+        $tabButton.FlatAppearance.MouseOverBackColor = $pillActive
+        $tabButton.Add_Click({ Show-PickerTab -index ([int]$this.Tag) })
+        $tabBar.Controls.Add($tabButton)
+        $tabButtons += $tabButton
     }
 
-    $btnFlipAll = New-Object System.Windows.Forms.Button
-    $btnFlipAll.Text = "Lật toàn bộ ảnh"
-    $btnFlipAll.Location = New-Object System.Drawing.Point(465, 720)
-    $btnFlipAll.Size = New-Object System.Drawing.Size(200, 38)
+    $btnFlipAll = New-FlatButton -text "Lật toàn bộ ảnh" -x 465 -y 760 -width 220 -height 42 -backColor $darkBg -foreColor $white -fontSize 13
+    $btnFlipAll.FlatAppearance.MouseOverBackColor = $cardBg
     $pickerForm.Controls.Add($btnFlipAll)
 
     $lblHelp = New-Object System.Windows.Forms.Label
-    $lblHelp.Text = "Bấm ảnh để gắn vào ô đang chọn (bấm lại để bỏ). Bấm vào ô trên khung để chọn ô."
-    $lblHelp.Location = New-Object System.Drawing.Point(680, 728)
-    $lblHelp.Size = New-Object System.Drawing.Size(695, 25)
+    $lblHelp.Text = "Bấm ảnh để gắn vào ô đang chọn, bấm lại để bỏ. Bấm vào ô trên khung để chọn ô."
+    $lblHelp.Location = New-Object System.Drawing.Point(700, 772)
+    $lblHelp.Size = New-Object System.Drawing.Size(675, 25)
+    $lblHelp.ForeColor = $softText
     $pickerForm.Controls.Add($lblHelp)
 
-    $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Áp dụng"
-    $btnApply.Location = New-Object System.Drawing.Point(1080, 768)
-    $btnApply.Size = New-Object System.Drawing.Size(140, 38)
-    $btnApply.BackColor = $pink
-    $btnApply.ForeColor = [System.Drawing.Color]::White
-    $btnApply.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnApply = New-FlatButton -text "Áp dụng" -x 1060 -y 820 -width 150 -height 46 -backColor $white -foreColor ([System.Drawing.Color]::Black) -fontSize 13 -radius 14
     $pickerForm.Controls.Add($btnApply)
 
-    $btnCancelPicker = New-Object System.Windows.Forms.Button
-    $btnCancelPicker.Text = "Huỷ"
-    $btnCancelPicker.Location = New-Object System.Drawing.Point(1235, 768)
-    $btnCancelPicker.Size = New-Object System.Drawing.Size(140, 38)
+    $btnCancelPicker = New-FlatButton -text "Huỷ" -x 1225 -y 820 -width 150 -height 46 -backColor $cardBg -foreColor $white -fontSize 13 -radius 14
     $pickerForm.Controls.Add($btnCancelPicker)
+
+    $toolTip = New-Object System.Windows.Forms.ToolTip
 
     function Get-PhotoEdit {
         param([string]$fileName)
@@ -1535,55 +1603,51 @@ function Show-PhotoPickerPopup {
 
         $panel.SuspendLayout()
         foreach ($fileName in $panel.Tag.Files) {
+            # Rounded card like the FE; pink background = photo used in the current frame
             $box = New-Object System.Windows.Forms.Panel
-            $box.Size = New-Object System.Drawing.Size(210, 205)
+            $box.Size = New-Object System.Drawing.Size(214, 196)
+            $box.Margin = New-Object System.Windows.Forms.Padding(8)
+            $box.BackColor = $cardBg
             $box.Tag = $fileName
             $box.Cursor = [System.Windows.Forms.Cursors]::Hand
+            Set-RoundedRegion -control $box -radius 16
 
             $pictureBox = New-Object System.Windows.Forms.PictureBox
-            $pictureBox.Location = New-Object System.Drawing.Point(5, 5)
-            $pictureBox.Size = New-Object System.Drawing.Size(200, 150)
+            $pictureBox.Location = New-Object System.Drawing.Point(7, 7)
+            $pictureBox.Size = New-Object System.Drawing.Size(200, 140)
             $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+            $pictureBox.BackColor = $cardBg
             $pictureBox.Tag = $fileName
             $box.Controls.Add($pictureBox)
 
-            # Slot number(s) of the photo in the current frame, like the FE
+            # Slot number(s) of the photo in the current frame, round pink badge like the FE
             $badge = New-Object System.Windows.Forms.Label
-            $badge.AutoSize = $true
-            $badge.Location = New-Object System.Drawing.Point(4, 4)
+            $badge.Location = New-Object System.Drawing.Point(6, 6)
+            $badge.Size = New-Object System.Drawing.Size(30, 30)
+            $badge.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
             $badge.BackColor = $pink
-            $badge.ForeColor = [System.Drawing.Color]::White
+            $badge.ForeColor = $white
             $badge.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-            $badge.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 0)
             $badge.Visible = $false
             $badge.Tag = $fileName
             $pictureBox.Controls.Add($badge)
 
-            $btnRotate = New-Object System.Windows.Forms.Button
-            $btnRotate.Text = "Xoay"
-            $btnRotate.Location = New-Object System.Drawing.Point(5, 160)
-            $btnRotate.Size = New-Object System.Drawing.Size(60, 40)
+            # Round pink rotate / flip buttons under the photo
+            $btnRotate = New-FlatButton -text ([string][char]0x21BB) -x 66 -y 152 -width 36 -height 36 -backColor $pink -foreColor $white -fontSize 14 -radius 18
+            $btnRotate.Font = New-Object System.Drawing.Font("Segoe UI Symbol", 14, [System.Drawing.FontStyle]::Bold)
             $btnRotate.Tag = $fileName
-            $btnRotate.Font = New-Object System.Drawing.Font("Segoe UI", 9)
             $box.Controls.Add($btnRotate)
+            $toolTip.SetToolTip($btnRotate, "Xoay 90 độ")
 
-            $btnFlip = New-Object System.Windows.Forms.Button
-            $btnFlip.Text = "Lật"
-            $btnFlip.Location = New-Object System.Drawing.Point(70, 160)
-            $btnFlip.Size = New-Object System.Drawing.Size(55, 40)
+            $btnFlip = New-FlatButton -text ([string][char]0x21C6) -x 112 -y 152 -width 36 -height 36 -backColor $pink -foreColor $white -fontSize 14 -radius 18
+            $btnFlip.Font = New-Object System.Drawing.Font("Segoe UI Symbol", 14, [System.Drawing.FontStyle]::Bold)
             $btnFlip.Tag = $fileName
-            $btnFlip.Font = New-Object System.Drawing.Font("Segoe UI", 9)
             $box.Controls.Add($btnFlip)
+            $toolTip.SetToolTip($btnFlip, "Lật ảnh")
 
-            $lblName = New-Object System.Windows.Forms.Label
-            $lblName.Text = $fileName
-            $lblName.Location = New-Object System.Drawing.Point(128, 160)
-            $lblName.Size = New-Object System.Drawing.Size(80, 42)
-            $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 7)
-            $lblName.Tag = $fileName
-            $box.Controls.Add($lblName)
+            $toolTip.SetToolTip($pictureBox, $fileName)
 
-            foreach ($control in @($box, $pictureBox, $badge, $lblName)) {
+            foreach ($control in @($box, $pictureBox, $badge)) {
                 $control.Add_Click({ Select-PickerPhoto -fileName ([string]$this.Tag) })
             }
             $btnRotate.Add_Click({ Set-PickerPhotoEdit -fileName ([string]$this.Tag) -rotate })
@@ -1594,6 +1658,7 @@ function Show-PhotoPickerPopup {
                 Box = $box
                 Picture = $pictureBox
                 Badge = $badge
+                Buttons = @($btnRotate, $btnFlip)
                 Thumb = Get-ScaledBitmapFromFile -path (Join-Path $folder $fileName) -maxSize 220
             }
             if ($null -ne $thumb.Thumb) {
@@ -1725,9 +1790,19 @@ function Show-PhotoPickerPopup {
                     $numbers += ($i + 1)
                 }
             }
-            $thumb.Badge.Text = $numbers -join ","
+            $text = $numbers -join ","
+            if ($thumb.Badge.Text -ne $text) {
+                $thumb.Badge.Text = $text
+                $thumb.Badge.Width = [Math]::Max(30, 14 + 10 * $text.Length)
+                Set-RoundedRegion -control $thumb.Badge -radius 15
+            }
             $thumb.Badge.Visible = $numbers.Count -gt 0
-            $thumb.Box.BackColor = if ($numbers.Count -gt 0) { $pink } else { [System.Drawing.SystemColors]::Control }
+            # Selected card: pink frame, dark pink buttons so they stay visible
+            $selected = $numbers.Count -gt 0
+            $thumb.Box.BackColor = if ($selected) { $pink } else { $cardBg }
+            foreach ($button in $thumb.Buttons) {
+                $button.BackColor = if ($selected) { $darkPink } else { $pink }
+            }
         }
 
         Update-PickerPreview
@@ -1787,7 +1862,15 @@ function Show-PhotoPickerPopup {
     }
 
     function Show-PickerTab {
-        $flow = $photoPanels[$tabs.SelectedIndex]
+        param([int]$index)
+
+        for ($t = 0; $t -lt $photoPanels.Count; $t++) {
+            $active = $t -eq $index
+            $photoPanels[$t].Visible = $active
+            $tabButtons[$t].BackColor = if ($active) { $pillActive } else { $pillBg }
+        }
+
+        $flow = $photoPanels[$index]
         if (-not $flow.Tag.Loaded) {
             $pickerForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
             Add-PickerThumbnails -panel $flow
@@ -1830,8 +1913,6 @@ function Show-PhotoPickerPopup {
             }
         }
     })
-
-    $tabs.Add_SelectedIndexChanged({ Show-PickerTab })
 
     $btnClearSlot.Add_Click({
         $state.Frames[$state.Frame].Slots[$state.Slot] = ""
@@ -1905,7 +1986,8 @@ function Show-PhotoPickerPopup {
     $pickerForm.Add_Shown({
         $state.Slot = [Math]::Max(0, $state.Frames[0].Slots.IndexOf(""))
         Update-Picker
-        Show-PickerTab
+        Show-PickerTab -index 0
+        $pickerForm.ActiveControl = $previewBox
     })
 
     [void]$pickerForm.ShowDialog()
