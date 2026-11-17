@@ -1,4 +1,4 @@
-﻿Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # Load SQLite DLL manually from local file
@@ -221,6 +221,7 @@ Sending API $apiName...
         Write-ApiLog "$apiName REQUEST_BODY=$json"
 
         $txtJson.Refresh()
+        $requestStart = Get-Date
         $waitForm = Show-WaitForm -text "Sending $apiName...`r`nBE is generating, this can take a while. Please wait."
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
@@ -311,6 +312,13 @@ $responseBody
         Write-ApiLog "$apiName ERROR_REQUEST_BODY=$json"
         Write-ApiLog "$apiName ERROR_RESPONSE_CODE=$responseCode"
         Write-ApiLog "$apiName ERROR_RESPONSE_BODY=$responseBody"
+
+        # Detail of the error from the BE log (BE only returns a short message)
+        if ($null -ne $requestStart) {
+            $beLog = Get-BeErrorLog -since $requestStart
+            $responseBody = "$responseBody`r`n`r`nBE log:`r`n$beLog"
+            $txtJson.Text = "$logText`r`n`r`n===== BE LOG =====`r`n$beLog"
+        }
 
         Show-ProcessRetryPopup `
             -transactionId $transactionId `
@@ -941,14 +949,43 @@ ORDER BY p.Id
         $frames += $frame
     }
 
-    # Layout without generated file: 2x6 = 2 strips, others = 1 frame
-    $nextIndex = if ($frames.Count -gt 0) { ($frames | Measure-Object -Property Index -Maximum).Maximum + 1 } else { 0 }
-    foreach ($row in $rows) {
-        if ($row.Files.Count -gt 0) {
-            continue
+    # Number of frames per frame type, same as BE (TransactionService.SyncUpdateTransaction):
+    # NumberOfLayout of PhotoPackageLayouts x (2x6 = 2 strips); no config = 1 layout per row.
+    # The customer can pick the same layout twice (1 row in DB), so split the frames over the rows of that type.
+    $hasPackageLayouts = Test-SQLiteTable -tableName "PhotoPackageLayouts"
+    foreach ($group in @($rows | Group-Object FrameId)) {
+        $groupRows = @($group.Group)
+        $strips = if ($groupRows[0].Is2x6) { 2 } else { 1 }
+        $numberOfLayout = 0
+        if ($hasPackageLayouts) {
+            # Old DB without NumberOfLayout column: same as BE, 1 layout per row
+            try {
+                $cmd = $global:SQLiteConnection.CreateCommand()
+                $cmd.CommandText = "SELECT IFNULL(NumberOfLayout, 0) FROM PhotoPackageLayouts WHERE PhotoPackageId = @packageId AND FrameId = @frameId ORDER BY Id LIMIT 1"
+                $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@packageId", $groupRows[0].PhotoPackageId))) | Out-Null
+                $cmd.Parameters.Add((New-Object System.Data.SQLite.SQLiteParameter("@frameId", $groupRows[0].FrameId))) | Out-Null
+                $value = $cmd.ExecuteScalar()
+                if ($null -ne $value -and $value -ne [DBNull]::Value) {
+                    $numberOfLayout = [int]$value
+                }
+            } catch {
+                $numberOfLayout = 0
+            }
         }
 
-        $count = if ($row.Is2x6 -and $row.NumberOfPrint -ge 2) { 2 } else { 1 }
+        $total = if ($numberOfLayout -gt 0) { $numberOfLayout * $strips } else { $groupRows.Count * $strips }
+        $total = [Math]::Max($total, $groupRows.Count)
+        $each = [int][Math]::Floor($total / $groupRows.Count)
+        $remain = $total % $groupRows.Count
+        for ($i = 0; $i -lt $groupRows.Count; $i++) {
+            $groupRows[$i] | Add-Member -NotePropertyName Expected -NotePropertyValue ($each + $(if ($i -lt $remain) { 1 } else { 0 })) -Force
+        }
+    }
+
+    # Frames not generated yet (missing {id}_n_QR.png)
+    $nextIndex = if ($frames.Count -gt 0) { ($frames | Measure-Object -Property Index -Maximum).Maximum + 1 } else { 0 }
+    foreach ($row in $rows) {
+        $count = $row.Expected - $row.Files.Count
         for ($i = 0; $i -lt $count; $i++) {
             $frame = [pscustomobject]@{
                 Index = $nextIndex
@@ -1374,19 +1411,20 @@ function New-FlatButton {
 function Show-PhotoPickerPopup {
     param(
         [string]$transactionId,
-        [string]$json
+        [string]$json,
+        [string]$applyText = ""
     )
 
     $body = $json | ConvertFrom-Json
     $details = @($body.photoPackageDetails)
     if ($details.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("JSON không có photoPackageDetails!", "Lỗi")
+        [System.Windows.Forms.MessageBox]::Show("JSON kh$([char]0x00F4)ng c$([char]0x00F3) photoPackageDetails!", "L$([char]0x1ED7)i")
         return $null
     }
 
     $folder = "D:\Work\PhotoBooth\Image\$transactionId"
     if (-not (Test-Path $folder)) {
-        [System.Windows.Forms.MessageBox]::Show("Không thấy thư mục:`n$folder", "Lỗi")
+        [System.Windows.Forms.MessageBox]::Show("Kh$([char]0x00F4)ng th$([char]0x1EA5)y th$([char]0x01B0) m$([char]0x1EE5)c:`n$folder", "L$([char]0x1ED7)i")
         return $null
     }
 
@@ -1463,7 +1501,7 @@ function Show-PhotoPickerPopup {
     $white = [System.Drawing.Color]::White
 
     $pickerForm = New-Object System.Windows.Forms.Form
-    $pickerForm.Text = "Chọn ảnh - $transactionId"
+    $pickerForm.Text = "Ch$([char]0x1ECD)n $([char]0x1EA3)nh - $transactionId"
     $pickerForm.Size = New-Object System.Drawing.Size(1400, 930)
     $pickerForm.StartPosition = "CenterParent"
     $pickerForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
@@ -1472,7 +1510,7 @@ function Show-PhotoPickerPopup {
     $pickerForm.ShowInTaskbar = $false
 
     $lblTitle = New-Object System.Windows.Forms.Label
-    $lblTitle.Text = "CHỌN ẢNH"
+    $lblTitle.Text = "CH$([char]0x1ECC)N $([char]0x1EA2)NH"
     $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 26, [System.Drawing.FontStyle]::Bold)
     $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $lblTitle.Location = New-Object System.Drawing.Point(0, 5)
@@ -1503,13 +1541,13 @@ function Show-PhotoPickerPopup {
     $lblSlotInfo.ForeColor = $softText
     $pickerForm.Controls.Add($lblSlotInfo)
 
-    $btnClearSlot = New-FlatButton -text "Xoá ô" -x 20 -y 795 -width 130 -height 40 -backColor $cardBg -foreColor $white
+    $btnClearSlot = New-FlatButton -text "Xo$([char]0x00E1) $([char]0x00F4)" -x 20 -y 795 -width 130 -height 40 -backColor $cardBg -foreColor $white
     $pickerForm.Controls.Add($btnClearSlot)
 
-    $btnClearFrame = New-FlatButton -text "Xoá cả khung" -x 160 -y 795 -width 150 -height 40 -backColor $cardBg -foreColor $white
+    $btnClearFrame = New-FlatButton -text "Xo$([char]0x00E1) c$([char]0x1EA3) khung" -x 160 -y 795 -width 150 -height 40 -backColor $cardBg -foreColor $white
     $pickerForm.Controls.Add($btnClearFrame)
 
-    # Pill tab bar like the FE: Ảnh filter / Ảnh mịn da / Ảnh gốc
+    # Pill tab bar like the FE: Anh filter / Anh min da / Anh goc
     $tabBar = New-Object System.Windows.Forms.Panel
     $tabBar.Location = New-Object System.Drawing.Point(685, 70)
     $tabBar.Size = New-Object System.Drawing.Size(480, 46)
@@ -1525,9 +1563,9 @@ function Show-PhotoPickerPopup {
 
     # Same order as the FE
     $tabDefs = @(
-        @{ Title = "Ảnh filter ($($filterFiles.Count))"; Files = $filterFiles },
-        @{ Title = "Ảnh mịn da ($($smoothFiles.Count))"; Files = $smoothFiles },
-        @{ Title = "Ảnh gốc ($($originalFiles.Count))"; Files = $originalFiles }
+        @{ Title = "$([char]0x1EA2)nh filter ($($filterFiles.Count))"; Files = $filterFiles },
+        @{ Title = "$([char]0x1EA2)nh m$([char]0x1ECB)n da ($($smoothFiles.Count))"; Files = $smoothFiles },
+        @{ Title = "$([char]0x1EA2)nh g$([char]0x1ED1)c ($($originalFiles.Count))"; Files = $originalFiles }
     )
     $photoPanels = @()
     $tabButtons = @()
@@ -1549,21 +1587,24 @@ function Show-PhotoPickerPopup {
         $tabButtons += $tabButton
     }
 
-    $btnFlipAll = New-FlatButton -text "Lật toàn bộ ảnh" -x 465 -y 760 -width 220 -height 42 -backColor $darkBg -foreColor $white -fontSize 13
+    $btnFlipAll = New-FlatButton -text "L$([char]0x1EAD)t to$([char]0x00E0)n b$([char]0x1ED9) $([char]0x1EA3)nh" -x 465 -y 760 -width 220 -height 42 -backColor $darkBg -foreColor $white -fontSize 13
     $btnFlipAll.FlatAppearance.MouseOverBackColor = $cardBg
     $pickerForm.Controls.Add($btnFlipAll)
 
     $lblHelp = New-Object System.Windows.Forms.Label
-    $lblHelp.Text = "Bấm ảnh để gắn vào ô đang chọn, bấm lại để bỏ. Bấm vào ô trên khung để chọn ô."
+    $lblHelp.Text = "B$([char]0x1EA5)m $([char]0x1EA3)nh $([char]0x0111)$([char]0x1EC3) g$([char]0x1EAF)n v$([char]0x00E0)o $([char]0x00F4) $([char]0x0111)ang ch$([char]0x1ECD)n, b$([char]0x1EA5)m l$([char]0x1EA1)i $([char]0x0111)$([char]0x1EC3) b$([char]0x1ECF). B$([char]0x1EA5)m v$([char]0x00E0)o $([char]0x00F4) tr$([char]0x00EA)n khung $([char]0x0111)$([char]0x1EC3) ch$([char]0x1ECD)n $([char]0x00F4)."
     $lblHelp.Location = New-Object System.Drawing.Point(700, 772)
     $lblHelp.Size = New-Object System.Drawing.Size(675, 25)
     $lblHelp.ForeColor = $softText
     $pickerForm.Controls.Add($lblHelp)
 
-    $btnApply = New-FlatButton -text "Áp dụng" -x 1060 -y 820 -width 150 -height 46 -backColor $white -foreColor ([System.Drawing.Color]::Black) -fontSize 13 -radius 14
+    $btnApply = New-FlatButton -text "$([char]0x00C1)p d$([char]0x1EE5)ng" -x 1060 -y 820 -width 150 -height 46 -backColor $white -foreColor ([System.Drawing.Color]::Black) -fontSize 13 -radius 14
+    if ($applyText) {
+        $btnApply.Text = $applyText
+    }
     $pickerForm.Controls.Add($btnApply)
 
-    $btnCancelPicker = New-FlatButton -text "Huỷ" -x 1225 -y 820 -width 150 -height 46 -backColor $cardBg -foreColor $white -fontSize 13 -radius 14
+    $btnCancelPicker = New-FlatButton -text "Hu$([char]0x1EF7)" -x 1225 -y 820 -width 150 -height 46 -backColor $cardBg -foreColor $white -fontSize 13 -radius 14
     $pickerForm.Controls.Add($btnCancelPicker)
 
     $toolTip = New-Object System.Windows.Forms.ToolTip
@@ -1637,13 +1678,13 @@ function Show-PhotoPickerPopup {
             $btnRotate.Font = New-Object System.Drawing.Font("Segoe UI Symbol", 14, [System.Drawing.FontStyle]::Bold)
             $btnRotate.Tag = $fileName
             $box.Controls.Add($btnRotate)
-            $toolTip.SetToolTip($btnRotate, "Xoay 90 độ")
+            $toolTip.SetToolTip($btnRotate, "Xoay 90 $([char]0x0111)$([char]0x1ED9)")
 
             $btnFlip = New-FlatButton -text ([string][char]0x21C6) -x 112 -y 152 -width 36 -height 36 -backColor $pink -foreColor $white -fontSize 14 -radius 18
             $btnFlip.Font = New-Object System.Drawing.Font("Segoe UI Symbol", 14, [System.Drawing.FontStyle]::Bold)
             $btnFlip.Tag = $fileName
             $box.Controls.Add($btnFlip)
-            $toolTip.SetToolTip($btnFlip, "Lật ảnh")
+            $toolTip.SetToolTip($btnFlip, "L$([char]0x1EAD)t $([char]0x1EA3)nh")
 
             $toolTip.SetToolTip($pictureBox, $fileName)
 
@@ -1766,7 +1807,7 @@ function Show-PhotoPickerPopup {
         for ($f = 0; $f -lt $state.Frames.Count; $f++) {
             $frame = $state.Frames[$f]
             $filled = @($frame.Slots | Where-Object { $_ }).Count
-            $text = "$($frame.Label) ($filled/$($frame.Slots.Count) ảnh)"
+            $text = "$($frame.Label) ($filled/$($frame.Slots.Count) $([char]0x1EA3)nh)"
             if ($cboFrames.Items.Count -le $f) {
                 [void]$cboFrames.Items.Add($text)
             } elseif ([string]$cboFrames.Items[$f] -ne $text) {
@@ -1779,8 +1820,8 @@ function Show-PhotoPickerPopup {
         $state.Updating = $false
 
         $frame = $state.Frames[$state.Frame]
-        $current = if ($frame.Slots[$state.Slot]) { $frame.Slots[$state.Slot] } else { "(trống)" }
-        $lblSlotInfo.Text = "Ô đang chọn: $($state.Slot + 1) / $($frame.Slots.Count) - $current"
+        $current = if ($frame.Slots[$state.Slot]) { $frame.Slots[$state.Slot] } else { "(tr$([char]0x1ED1)ng)" }
+        $lblSlotInfo.Text = "$([char]0x00D4) $([char]0x0111)ang ch$([char]0x1ECD)n: $($state.Slot + 1) / $($frame.Slots.Count) - $current"
 
         # Slot numbers on the photos of the current frame
         foreach ($thumb in $state.Thumbs) {
@@ -1948,8 +1989,8 @@ function Show-PhotoPickerPopup {
         $missing = @($state.Frames | Where-Object { @($_.Slots | Where-Object { -not $_ }).Count -gt 0 } | ForEach-Object { $_.Label })
         if ($missing.Count -gt 0) {
             $answer = [System.Windows.Forms.MessageBox]::Show(
-                "Các khung còn ô trống:`n$($missing -join "`n")`n`nÔ trống sẽ để trắng trên ảnh. Vẫn áp dụng?",
-                "Còn ô trống",
+                "C$([char]0x00E1)c khung c$([char]0x00F2)n $([char]0x00F4) tr$([char]0x1ED1)ng:`n$($missing -join "`n")`n`n$([char]0x00D4) tr$([char]0x1ED1)ng s$([char]0x1EBD) $([char]0x0111)$([char]0x1EC3) tr$([char]0x1EAF)ng tr$([char]0x00EA)n $([char]0x1EA3)nh. V$([char]0x1EAB)n $([char]0x00E1)p d$([char]0x1EE5)ng?",
+                "C$([char]0x00F2)n $([char]0x00F4) tr$([char]0x1ED1)ng",
                 [System.Windows.Forms.MessageBoxButtons]::YesNo)
             if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
                 return
@@ -2140,6 +2181,513 @@ function Show-SelfBoothJsonPopup {
     })
 
     [void]$sbForm.ShowDialog($form)
+}
+
+function Get-BeErrorLog {
+    param(
+        [datetime]$since
+    )
+
+    # BE log4net file (Web.config): C:\log\FunStudio\yyyy.MM.dd.log
+    $path = "C:\log\FunStudio\$($since.ToString('yyyy.MM.dd')).log"
+    if (-not (Test-Path $path)) {
+        return "(Kh$([char]0x00F4)ng th$([char]0x1EA5)y file log BE: $path)"
+    }
+
+    try {
+        # BE keeps the file open, so open it with ReadWrite sharing
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        $content = $reader.ReadToEnd()
+        $reader.Close()
+    } catch {
+        return "(Kh$([char]0x00F4)ng $([char]0x0111)$([char]0x1ECD)c $([char]0x0111)$([char]0x01B0)$([char]0x1EE3)c log BE: $($_.Exception.Message))"
+    }
+
+    # ERROR entries written since the request started (+ their stack trace lines)
+    $lines = New-Object System.Collections.ArrayList
+    $take = $false
+    foreach ($line in ($content -split "`r?`n")) {
+        if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+            $time = [datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+            $take = ($time -ge $since.AddSeconds(-2)) -and ($line -match ' ERROR ')
+        }
+        if ($take) {
+            [void]$lines.Add($line)
+        }
+    }
+
+    if ($lines.Count -eq 0) {
+        return "(Log BE kh$([char]0x00F4)ng c$([char]0x00F3) d$([char]0x00F2)ng ERROR t$([char]0x1EEB) $($since.ToString('HH:mm:ss')))"
+    }
+    return (($lines | Select-Object -Last 60) -join "`r`n")
+}
+
+function Invoke-BeApi {
+    param(
+        [string]$apiName,
+        [string]$apiUrl,
+        [string]$json,
+        [string]$waitText
+    )
+
+    $result = @{
+        Ok = $false
+        Code = "Unknown"
+        Body = ""
+        Seconds = 0
+        BeLog = ""
+    }
+
+    $start = Get-Date
+    Write-ApiLog "$apiName REQUEST_URL=$apiUrl"
+    Write-ApiLog "$apiName REQUEST_BODY=$json"
+
+    $waitForm = Show-WaitForm -text $waitText
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $response = Invoke-WebRequest `
+            -Uri $apiUrl `
+            -Method POST `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
+            -ContentType "application/json; charset=utf-8" `
+            -UseBasicParsing
+        $result.Ok = $true
+        $result.Code = [string][int]$response.StatusCode
+        $result.Body = $response.Content
+    } catch {
+        $result.Body = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $result.Body = $_.ErrorDetails.Message
+        }
+        try {
+            if ($null -ne $_.Exception.Response) {
+                $result.Code = [string][int]$_.Exception.Response.StatusCode
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($null -ne $stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    $reader.Close()
+                    if (-not [string]::IsNullOrWhiteSpace($body)) {
+                        $result.Body = $body
+                    }
+                }
+            }
+        } catch {
+        }
+    } finally {
+        $stopwatch.Stop()
+        Close-WaitForm -waitForm $waitForm
+    }
+
+    $result.Seconds = [int]$stopwatch.Elapsed.TotalSeconds
+    Write-ApiLog "$apiName RESPONSE_CODE=$($result.Code) DURATION=$($result.Seconds)s"
+    Write-ApiLog "$apiName RESPONSE_BODY=$($result.Body)"
+
+    if (-not $result.Ok) {
+        $result.BeLog = Get-BeErrorLog -since $start
+        Write-ApiLog "$apiName BE_LOG=$($result.BeLog)"
+    }
+
+    $txtJson.Text = @"
+===== $apiName REQUEST URL =====
+$apiUrl
+
+===== $apiName REQUEST BODY =====
+$json
+
+===== $apiName RESPONSE ($($result.Code), $($result.Seconds)s) =====
+$($result.Body)
+
+===== BE LOG =====
+$($result.BeLog)
+"@
+    return $result
+}
+
+function Show-ErrorDetail {
+    param(
+        [string]$title,
+        $result,
+        [switch]$allowEdit
+    )
+
+    $state = @{ Choice = "close" }
+
+    $errForm = New-Object System.Windows.Forms.Form
+    $errForm.Text = $title
+    $errForm.Size = New-Object System.Drawing.Size(1000, 640)
+    $errForm.StartPosition = "CenterParent"
+    $errForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $errForm.BackColor = [System.Drawing.Color]::FromArgb(36, 29, 35)
+    $errForm.ForeColor = [System.Drawing.Color]::White
+    $errForm.ShowInTaskbar = $false
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Text = "$title - BE tr$([char]0x1EA3) v$([char]0x1EC1) m$([char]0x00E3) $($result.Code) sau $($result.Seconds)s"
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.ForeColor = [System.Drawing.Color]::FromArgb(240, 128, 150)
+    $lblTitle.Location = New-Object System.Drawing.Point(15, 10)
+    $lblTitle.Size = New-Object System.Drawing.Size(955, 35)
+    $errForm.Controls.Add($lblTitle)
+
+    $txtDetail = New-Object System.Windows.Forms.TextBox
+    $txtDetail.Location = New-Object System.Drawing.Point(15, 50)
+    $txtDetail.Size = New-Object System.Drawing.Size(955, 480)
+    $txtDetail.Multiline = $true
+    $txtDetail.ReadOnly = $true
+    $txtDetail.ScrollBars = "Both"
+    $txtDetail.WordWrap = $false
+    $txtDetail.BackColor = [System.Drawing.Color]::FromArgb(25, 20, 24)
+    $txtDetail.ForeColor = [System.Drawing.Color]::White
+    $txtDetail.Font = New-Object System.Drawing.Font("Consolas", 9.5)
+    $txtDetail.Text = @"
+BE tr$([char]0x1EA3) v$([char]0x1EC1):
+$($result.Body)
+
+L$([char]0x1ED7)i chi ti$([char]0x1EBF)t trong log BE:
+$($result.BeLog)
+"@
+    $errForm.Controls.Add($txtDetail)
+
+    $x = 15
+    if ($allowEdit) {
+        $btnEdit = New-FlatButton -text "S$([char]0x1EED)a l$([char]0x1EA1)i" -x $x -y 545 -width 150 -height 42 -backColor ([System.Drawing.Color]::White) -foreColor ([System.Drawing.Color]::Black) -fontSize 11
+        $btnEdit.Add_Click({ $state.Choice = "edit"; $errForm.Close() })
+        $errForm.Controls.Add($btnEdit)
+        $x += 165
+    }
+
+    $btnCopy = New-FlatButton -text "Copy l$([char]0x1ED7)i" -x $x -y 545 -width 150 -height 42 -backColor ([System.Drawing.Color]::FromArgb(58, 49, 56)) -foreColor ([System.Drawing.Color]::White) -fontSize 11
+    $btnCopy.Add_Click({ [System.Windows.Forms.Clipboard]::SetText($txtDetail.Text) })
+    $errForm.Controls.Add($btnCopy)
+
+    $btnClose = New-FlatButton -text "$([char]0x0110)$([char]0x00F3)ng" -x 820 -y 545 -width 150 -height 42 -backColor ([System.Drawing.Color]::FromArgb(58, 49, 56)) -foreColor ([System.Drawing.Color]::White) -fontSize 11
+    $btnClose.Add_Click({ $state.Choice = "close"; $errForm.Close() })
+    $errForm.Controls.Add($btnClose)
+
+    $errForm.Add_Shown({ $txtDetail.SelectionStart = 0; $txtDetail.SelectionLength = 0; $errForm.ActiveControl = $btnClose })
+    [void]$errForm.ShowDialog()
+    $errForm.Dispose()
+    return $state.Choice
+}
+
+function Show-GenResult {
+    param(
+        [string]$transactionId,
+        [int]$outputCount,
+        [string]$message
+    )
+
+    $state = @{ Choice = "close" }
+    $pink = [System.Drawing.Color]::FromArgb(240, 128, 150)
+    $darkBg = [System.Drawing.Color]::FromArgb(36, 29, 35)
+    $cardBg = [System.Drawing.Color]::FromArgb(58, 49, 56)
+    $white = [System.Drawing.Color]::White
+
+    $resultForm = New-Object System.Windows.Forms.Form
+    $resultForm.Text = "K$([char]0x1EBF)t qu$([char]0x1EA3) - $transactionId"
+    $resultForm.Size = New-Object System.Drawing.Size(1400, 900)
+    $resultForm.StartPosition = "CenterParent"
+    $resultForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $resultForm.BackColor = $darkBg
+    $resultForm.ForeColor = $white
+    $resultForm.ShowInTaskbar = $false
+
+    $lblTitle = New-Object System.Windows.Forms.Label
+    $lblTitle.Text = "KI$([char]0x1EC2)M TRA $([char]0x1EA2)NH"
+    $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 24, [System.Drawing.FontStyle]::Bold)
+    $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $lblTitle.Location = New-Object System.Drawing.Point(0, 5)
+    $lblTitle.Size = New-Object System.Drawing.Size(1385, 50)
+    $resultForm.Controls.Add($lblTitle)
+
+    $lblMessage = New-Object System.Windows.Forms.Label
+    $lblMessage.Text = $message
+    $lblMessage.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $lblMessage.ForeColor = [System.Drawing.Color]::FromArgb(200, 190, 198)
+    $lblMessage.Location = New-Object System.Drawing.Point(0, 55)
+    $lblMessage.Size = New-Object System.Drawing.Size(1385, 25)
+    $resultForm.Controls.Add($lblMessage)
+
+    $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $flow.Location = New-Object System.Drawing.Point(20, 90)
+    $flow.Size = New-Object System.Drawing.Size(1345, 690)
+    $flow.AutoScroll = $true
+    $flow.BackColor = $darkBg
+    $resultForm.Controls.Add($flow)
+
+    # Generated images: frame 1 = {id}.png, frame n = {id}_n.png
+    $folder = "D:\Work\PhotoBooth\Image\$transactionId"
+    $bitmaps = @()
+    for ($n = 1; $n -le $outputCount; $n++) {
+        $name = if ($n -eq 1) { "$transactionId.png" } else { "${transactionId}_$n.png" }
+        $card = New-Object System.Windows.Forms.Panel
+        $card.Size = New-Object System.Drawing.Size(320, 660)
+        $card.Margin = New-Object System.Windows.Forms.Padding(8)
+        $card.BackColor = $cardBg
+        Set-RoundedRegion -control $card -radius 16
+
+        $pictureBox = New-Object System.Windows.Forms.PictureBox
+        $pictureBox.Location = New-Object System.Drawing.Point(10, 10)
+        $pictureBox.Size = New-Object System.Drawing.Size(300, 600)
+        $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $bitmap = Get-ScaledBitmapFromFile -path (Join-Path $folder $name) -maxSize 1000
+        if ($null -ne $bitmap) {
+            $pictureBox.Image = $bitmap
+            $bitmaps += $bitmap
+        }
+        $card.Controls.Add($pictureBox)
+
+        $lblName = New-Object System.Windows.Forms.Label
+        $lblName.Text = if ($null -ne $bitmap) { "Khung $n" } else { "Khung $n - KH$([char]0x00D4)NG C$([char]0x00D3) $([char]0x1EA2)NH" }
+        $lblName.ForeColor = if ($null -ne $bitmap) { $white } else { $pink }
+        $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+        $lblName.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $lblName.Location = New-Object System.Drawing.Point(10, 618)
+        $lblName.Size = New-Object System.Drawing.Size(300, 30)
+        $card.Controls.Add($lblName)
+
+        $flow.Controls.Add($card)
+    }
+
+    $btnPrint = New-FlatButton -text "In $([char]0x1EA3)nh" -x 20 -y 795 -width 170 -height 48 -backColor $white -foreColor ([System.Drawing.Color]::Black) -fontSize 13 -radius 14
+    $btnPrint.Add_Click({ $state.Choice = "print"; $resultForm.Close() })
+    $resultForm.Controls.Add($btnPrint)
+
+    $btnVideo = New-FlatButton -text "T$([char]0x1EA1)o video + $([char]0x0111)$([char]0x1ED3)ng b$([char]0x1ED9)" -x 205 -y 795 -width 240 -height 48 -backColor $pink -foreColor $white -fontSize 12 -radius 14
+    $btnVideo.Add_Click({ $state.Choice = "video"; $resultForm.Close() })
+    $resultForm.Controls.Add($btnVideo)
+
+    $btnEdit = New-FlatButton -text "S$([char]0x1EED)a l$([char]0x1EA1)i $([char]0x1EA3)nh" -x 460 -y 795 -width 170 -height 48 -backColor $cardBg -foreColor $white -fontSize 12 -radius 14
+    $btnEdit.Add_Click({ $state.Choice = "edit"; $resultForm.Close() })
+    $resultForm.Controls.Add($btnEdit)
+
+    $btnClose = New-FlatButton -text "$([char]0x0110)$([char]0x00F3)ng" -x 1195 -y 795 -width 170 -height 48 -backColor $cardBg -foreColor $white -fontSize 12 -radius 14
+    $btnClose.Add_Click({ $state.Choice = "close"; $resultForm.Close() })
+    $resultForm.Controls.Add($btnClose)
+
+    [void]$resultForm.ShowDialog()
+    foreach ($bitmap in $bitmaps) {
+        $bitmap.Dispose()
+    }
+    $resultForm.Dispose()
+    return $state.Choice
+}
+
+function Show-SelfBoothPrintDialog {
+    param(
+        [string]$transactionId
+    )
+
+    while ($true) {
+        $frames = Get-SelfBoothFrames -transactionId $transactionId
+        if ($frames.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Giao d$([char]0x1ECB)ch kh$([char]0x00F4)ng c$([char]0x00F3) d$([char]0x00F2)ng g$([char]0x00F3)i ch$([char]0x1EE5)p!", "L$([char]0x1ED7)i")
+            return
+        }
+
+        $state = @{ Send = $false }
+        $darkBg = [System.Drawing.Color]::FromArgb(36, 29, 35)
+        $cardBg = [System.Drawing.Color]::FromArgb(58, 49, 56)
+        $white = [System.Drawing.Color]::White
+
+        $printForm = New-Object System.Windows.Forms.Form
+        $printForm.Text = "In $([char]0x1EA3)nh - $transactionId"
+        $printForm.Size = New-Object System.Drawing.Size(900, 760)
+        $printForm.StartPosition = "CenterParent"
+        $printForm.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $printForm.BackColor = $darkBg
+        $printForm.ForeColor = $white
+        $printForm.ShowInTaskbar = $false
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = "S$([char]0x1ED0) L$([char]0x01AF)$([char]0x1EE2)NG IN"
+        $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 22, [System.Drawing.FontStyle]::Bold)
+        $lblTitle.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $lblTitle.Location = New-Object System.Drawing.Point(0, 5)
+        $lblTitle.Size = New-Object System.Drawing.Size(885, 45)
+        $printForm.Controls.Add($lblTitle)
+
+        $lblHint = New-Object System.Windows.Forms.Label
+        $lblHint.Text = "2 d$([char]0x1EA3)i c$([char]0x00F9)ng layout 2x6 in chung 1 t$([char]0x1EDD): s$([char]0x1ED1) l$([char]0x01B0)$([char]0x1EE3)ng c$([char]0x1EE7)a d$([char]0x1EA3)i $([char]0x0111)$([char]0x1EA7)u = s$([char]0x1ED1) t$([char]0x1EDD). $([char]0x0110)$([char]0x1EB7)t 0 $([char]0x0111)$([char]0x1EC3) b$([char]0x1ECF) kh$([char]0x00F4)ng in khung $([char]0x0111)$([char]0x00F3)."
+        $lblHint.ForeColor = [System.Drawing.Color]::FromArgb(200, 190, 198)
+        $lblHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $lblHint.Location = New-Object System.Drawing.Point(0, 50)
+        $lblHint.Size = New-Object System.Drawing.Size(885, 25)
+        $printForm.Controls.Add($lblHint)
+
+        $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $flow.Location = New-Object System.Drawing.Point(20, 85)
+        $flow.Size = New-Object System.Drawing.Size(845, 540)
+        $flow.AutoScroll = $true
+        $flow.FlowDirection = [System.Windows.Forms.FlowDirection]::TopDown
+        $flow.WrapContents = $false
+        $flow.BackColor = $darkBg
+        $printForm.Controls.Add($flow)
+
+        $folder = "D:\Work\PhotoBooth\Image\$transactionId"
+        $inputs = @()
+        $bitmaps = @()
+        foreach ($frame in $frames) {
+            $row = New-Object System.Windows.Forms.Panel
+            $row.Size = New-Object System.Drawing.Size(815, 120)
+            $row.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+            $row.BackColor = $cardBg
+            Set-RoundedRegion -control $row -radius 12
+
+            $pictureBox = New-Object System.Windows.Forms.PictureBox
+            $pictureBox.Location = New-Object System.Drawing.Point(10, 10)
+            $pictureBox.Size = New-Object System.Drawing.Size(150, 100)
+            $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+            if ($frame.FileName) {
+                $bitmap = Get-ScaledBitmapFromFile -path (Join-Path $folder $frame.FileName) -maxSize 300
+                if ($null -ne $bitmap) {
+                    $pictureBox.Image = $bitmap
+                    $bitmaps += $bitmap
+                }
+            }
+            $row.Controls.Add($pictureBox)
+
+            $type = if ($frame.Row.Is2x6) { "2x6" } else { "4x6" }
+            $lblFrame = New-Object System.Windows.Forms.Label
+            $lblFrame.Text = "Khung $($frame.Index + 1) - $type - layout $($frame.Row.LayoutId) $($frame.Row.Code)`r`n" + $(if ($frame.FileName) { $frame.FileName } else { "Ch$([char]0x01B0)a c$([char]0x00F3) $([char]0x1EA3)nh, c$([char]0x1EA7)n t$([char]0x1EA1)o $([char]0x1EA3)nh tr$([char]0x01B0)$([char]0x1EDB)c" })
+            $lblFrame.Location = New-Object System.Drawing.Point(175, 25)
+            $lblFrame.Size = New-Object System.Drawing.Size(470, 70)
+            $row.Controls.Add($lblFrame)
+
+            $numCopies = New-Object System.Windows.Forms.NumericUpDown
+            $numCopies.Location = New-Object System.Drawing.Point(670, 40)
+            $numCopies.Size = New-Object System.Drawing.Size(120, 40)
+            $numCopies.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+            $numCopies.Minimum = 0
+            $numCopies.Maximum = 50
+            $numCopies.Value = [Math]::Min(50, [Math]::Max(0, $frame.NumberOfPrint))
+            $numCopies.TextAlign = [System.Windows.Forms.HorizontalAlignment]::Center
+            $row.Controls.Add($numCopies)
+
+            $inputs += @{ Frame = $frame; Input = $numCopies }
+            $flow.Controls.Add($row)
+        }
+
+        $btnSend = New-FlatButton -text "In" -x 20 -y 645 -width 170 -height 48 -backColor $white -foreColor ([System.Drawing.Color]::Black) -fontSize 13 -radius 14
+        $btnSend.Add_Click({ $state.Send = $true; $printForm.Close() })
+        $printForm.Controls.Add($btnSend)
+
+        $btnCancel = New-FlatButton -text "Hu$([char]0x1EF7)" -x 695 -y 645 -width 170 -height 48 -backColor $cardBg -foreColor $white -fontSize 12 -radius 14
+        $btnCancel.Add_Click({ $printForm.Close() })
+        $printForm.Controls.Add($btnCancel)
+
+        [void]$printForm.ShowDialog()
+        foreach ($item in $inputs) {
+            $item.Frame.NumberOfPrint = [int]$item.Input.Value
+        }
+        foreach ($bitmap in $bitmaps) {
+            $bitmap.Dispose()
+        }
+        $printForm.Dispose()
+
+        if (-not $state.Send) {
+            return
+        }
+
+        $printFrames = @($frames | Where-Object { $_.NumberOfPrint -gt 0 })
+        if ($printFrames.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Ch$([char]0x01B0)a c$([char]0x00F3) khung n$([char]0x00E0)o c$([char]0x00F3) s$([char]0x1ED1) l$([char]0x01B0)$([char]0x1EE3)ng in!", "In $([char]0x1EA3)nh")
+            continue
+        }
+
+        $json = Get-SelfBoothPrintJson -transactionId $transactionId -frames $printFrames
+        $result = Invoke-BeApi -apiName "SelfBoothPrint" -apiUrl "http://localhost:8088/api/print/printimage" -json $json -waitText "$([char]0x0110)ang g$([char]0x1EED)i l$([char]0x1EC7)nh in...`r`nVui l$([char]0x00F2)ng ch$([char]0x1EDD)."
+        if ($result.Ok) {
+            [System.Windows.Forms.MessageBox]::Show("$([char]0x0110)$([char]0x00E3) g$([char]0x1EED)i l$([char]0x1EC7)nh in ($($result.Seconds)s).", "In $([char]0x1EA3)nh")
+            return
+        }
+
+        $choice = Show-ErrorDetail -title "In $([char]0x1EA3)nh l$([char]0x1ED7)i" -result $result -allowEdit
+        if ($choice -ne "edit") {
+            return
+        }
+    }
+}
+
+function Start-SelfBoothGenFlow {
+    param(
+        [string]$transactionId
+    )
+
+    $frames = Get-SelfBoothFrames -transactionId $transactionId
+    if ($frames.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Giao d$([char]0x1ECB)ch kh$([char]0x00F4)ng c$([char]0x00F3) d$([char]0x00F2)ng g$([char]0x00F3)i ch$([char]0x1EE5)p!", "L$([char]0x1ED7)i")
+        return
+    }
+
+    $json = Get-SelfBoothProcessJson -transactionId $transactionId -apiName "ProcessImage" -frames $frames
+    if (-not $json) {
+        [System.Windows.Forms.MessageBox]::Show("Kh$([char]0x00F4)ng th$([char]0x1EA5)y giao d$([char]0x1ECB)ch!", "L$([char]0x1ED7)i")
+        return
+    }
+
+    :genLoop while ($true) {
+        # 1. Choose photos of each frame
+        $picked = Show-PhotoPickerPopup -transactionId $transactionId -json $json -applyText "T$([char]0x1EA1)o $([char]0x1EA3)nh"
+        if (-not $picked) {
+            return
+        }
+        $json = $picked
+        $outputCount = @(($json | ConvertFrom-Json).photoPackageDetails).Count
+
+        # 2. Generate images
+        $result = Invoke-BeApi -apiName "ProcessImage" -apiUrl "http://localhost:8088/api/file/processimage" -json $json -waitText "$([char]0x0110)ang t$([char]0x1EA1)o $([char]0x1EA3)nh...`r`nBE $([char]0x0111)ang gh$([char]0x00E9)p $([char]0x1EA3)nh, c$([char]0x00F3) th$([char]0x1EC3) m$([char]0x1EA5)t m$([char]0x1ED9)t l$([char]0x00FA)c."
+        if (-not $result.Ok) {
+            $choice = Show-ErrorDetail -title "T$([char]0x1EA1)o $([char]0x1EA3)nh l$([char]0x1ED7)i" -result $result -allowEdit
+            if ($choice -eq "edit") {
+                continue genLoop
+            }
+            return
+        }
+
+        # 3. Check the result: print / video / edit again
+        $message = "T$([char]0x1EA1)o $([char]0x1EA3)nh xong sau $($result.Seconds)s. Ki$([char]0x1EC3)m tra $([char]0x1EA3)nh r$([char]0x1ED3)i ch$([char]0x1ECD)n b$([char]0x01B0)$([char]0x1EDB)c ti$([char]0x1EBF)p theo."
+        while ($true) {
+            $choice = Show-GenResult -transactionId $transactionId -outputCount $outputCount -message $message
+            switch ($choice) {
+                "print" {
+                    Show-SelfBoothPrintDialog -transactionId $transactionId
+                    $message = "Ki$([char]0x1EC3)m tra $([char]0x1EA3)nh r$([char]0x1ED3)i ch$([char]0x1ECD)n b$([char]0x01B0)$([char]0x1EDB)c ti$([char]0x1EBF)p theo."
+                }
+                "video" {
+                    # Same photos as the images; ProcessVideo also keeps the stickers of frame 1
+                    $videoBody = (Get-SelfBoothProcessJson -transactionId $transactionId -apiName "ProcessVideo" -frames $frames) | ConvertFrom-Json
+                    $imageBody = $json | ConvertFrom-Json
+                    $videoDetails = @($imageBody.photoPackageDetails)
+                    if (@($videoBody.photoPackageDetails).Count -gt 0) {
+                        $videoDetails[0].listSticker = @($videoBody.photoPackageDetails)[0].listSticker
+                    }
+                    $videoBody.listImages = $imageBody.listImages
+                    $videoBody.photoPackageDetails = $videoDetails
+                    $videoJson = $videoBody | ConvertTo-Json -Depth 20
+
+                    $videoResult = Invoke-BeApi -apiName "ProcessVideo" -apiUrl "http://localhost:8088/api/file/processvideo" -json $videoJson -waitText "$([char]0x0110)ang t$([char]0x1EA1)o video v$([char]0x00E0) $([char]0x0111)$([char]0x1ED3)ng b$([char]0x1ED9)...`r`nVui l$([char]0x00F2)ng ch$([char]0x1EDD)."
+                    if ($videoResult.Ok) {
+                        $message = "T$([char]0x1EA1)o video v$([char]0x00E0) $([char]0x0111)$([char]0x1ED3)ng b$([char]0x1ED9) xong sau $($videoResult.Seconds)s."
+                    } else {
+                        $choice = Show-ErrorDetail -title "T$([char]0x1EA1)o video l$([char]0x1ED7)i" -result $videoResult -allowEdit
+                        if ($choice -eq "edit") {
+                            continue genLoop
+                        }
+                        $message = "T$([char]0x1EA1)o video l$([char]0x1ED7)i, xem log ph$([char]0x00ED)a d$([char]0x01B0)$([char]0x1EDB)i c$([char]0x1EED)a s$([char]0x1ED5) ch$([char]0x00ED)nh."
+                    }
+                }
+                "edit" {
+                    continue genLoop
+                }
+                default {
+                    return
+                }
+            }
+        }
+    }
 }
 
 function Start-SelfBoothAction {
@@ -2448,7 +2996,7 @@ $btnPrintNow.Add_Click({
 
     # Selfbooth: print every frame of the photo package (number of prints is edited in the popup)
     if (Test-SelfBoothTransaction -transactionId $transactionId) {
-        Start-SelfBoothAction -transactionId $transactionId -mode "Print"
+        Show-SelfBoothPrintDialog -transactionId $transactionId
         return
     }
 
@@ -2482,7 +3030,7 @@ $btnProcessImage.Add_Click({
 
     $transactionId = $listView.SelectedItems[0].Text
     if (Test-SelfBoothTransaction -transactionId $transactionId) {
-        Start-SelfBoothAction -transactionId $transactionId -mode "ProcessImage"
+        Start-SelfBoothGenFlow -transactionId $transactionId
         return
     }
 
