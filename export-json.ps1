@@ -114,6 +114,47 @@ function Write-ApiLog {
     }
 }
 
+function Show-WaitForm {
+    param(
+        [string]$text
+    )
+
+    # The API call blocks the UI thread, so show a small window before sending
+    $waitForm = New-Object System.Windows.Forms.Form
+    $waitForm.Text = "Please wait"
+    $waitForm.Size = New-Object System.Drawing.Size(460, 150)
+    $waitForm.StartPosition = "CenterScreen"
+    $waitForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $waitForm.ControlBox = $false
+    $waitForm.TopMost = $true
+    $waitForm.ShowInTaskbar = $false
+    $waitForm.Font = New-Object System.Drawing.Font("Segoe UI", 11)
+
+    $lblWait = New-Object System.Windows.Forms.Label
+    $lblWait.Text = $text
+    $lblWait.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $lblWait.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $waitForm.Controls.Add($lblWait)
+
+    $waitForm.Show()
+    $waitForm.Refresh()
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+    [System.Windows.Forms.Application]::DoEvents()
+    return $waitForm
+}
+
+function Close-WaitForm {
+    param(
+        $waitForm
+    )
+
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+    if ($null -ne $waitForm) {
+        $waitForm.Close()
+        $waitForm.Dispose()
+    }
+}
+
 function Send-ToPrintAPI {
     param (
         [string]$transactionId,
@@ -130,7 +171,12 @@ function Send-ToPrintAPI {
         }
 
         $json = $body | ConvertTo-Json -Depth 3
-        $null = Invoke-RestMethod -Uri $apiUrl -Method POST -Body $json -ContentType "application/json"
+        $waitForm = Show-WaitForm -text "Sending to printer...`r`nPlease wait."
+        try {
+            $null = Invoke-RestMethod -Uri $apiUrl -Method POST -Body $json -ContentType "application/json"
+        } finally {
+            Close-WaitForm -waitForm $waitForm
+        }
         [System.Windows.Forms.MessageBox]::Show("Print successfully!", "Success")
     } catch {
         [System.Windows.Forms.MessageBox]::Show("Send error: $($_.Exception.Message)", "Error")
@@ -174,12 +220,21 @@ Sending API $apiName...
         Write-ApiLog "$apiName REQUEST_URL=$apiUrl"
         Write-ApiLog "$apiName REQUEST_BODY=$json"
 
-        $response = Invoke-WebRequest `
-            -Uri $apiUrl `
-            -Method POST `
-            -Body $json `
-            -ContentType "application/json" `
-            -UseBasicParsing
+        $txtJson.Refresh()
+        $waitForm = Show-WaitForm -text "Sending $apiName...`r`nBE is generating, this can take a while. Please wait."
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $apiUrl `
+                -Method POST `
+                -Body $json `
+                -ContentType "application/json" `
+                -UseBasicParsing
+        } finally {
+            $stopwatch.Stop()
+            Close-WaitForm -waitForm $waitForm
+            Write-ApiLog "$apiName DURATION=$([int]$stopwatch.Elapsed.TotalSeconds)s"
+        }
 
         $responseCode = [int]$response.StatusCode
         $responseBody = $response.Content
@@ -207,7 +262,7 @@ $responseBody
         Write-ApiLog "$apiName RESPONSE_CODE=$responseCode"
         Write-ApiLog "$apiName RESPONSE_BODY=$responseBody"
 
-        [System.Windows.Forms.MessageBox]::Show("$apiName completed successfully!`nResponse Code: $responseCode", "Success")
+        [System.Windows.Forms.MessageBox]::Show("$apiName completed successfully!`nResponse Code: $responseCode`nTime: $([int]$stopwatch.Elapsed.TotalSeconds)s", "Success")
     }
     catch {
         $responseCode = "Unknown"
@@ -1127,12 +1182,17 @@ function Send-ToSelfBoothPrintAPI {
         $null = $requestJson | ConvertFrom-Json -ErrorAction Stop
         Write-ApiLog "SelfBoothPrint REQUEST_BODY=$requestJson"
 
-        $response = Invoke-WebRequest `
-            -Uri $apiUrl `
-            -Method POST `
-            -Body ([System.Text.Encoding]::UTF8.GetBytes($requestJson)) `
-            -ContentType "application/json" `
-            -UseBasicParsing
+        $waitForm = Show-WaitForm -text "Sending to printer...`r`nPlease wait."
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $apiUrl `
+                -Method POST `
+                -Body ([System.Text.Encoding]::UTF8.GetBytes($requestJson)) `
+                -ContentType "application/json" `
+                -UseBasicParsing
+        } finally {
+            Close-WaitForm -waitForm $waitForm
+        }
 
         Write-ApiLog "SelfBoothPrint RESPONSE_CODE=$([int]$response.StatusCode)"
         $txtJson.Text = "===== SelfBoothPrint REQUEST BODY =====`r`n$requestJson`r`n`r`n===== RESPONSE =====`r`n$($response.Content)"
