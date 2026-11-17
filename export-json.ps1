@@ -267,6 +267,46 @@ $responseBody
     }
 }
 
+function Remove-ImageFilterSuffix {
+    param(
+        [string]$json
+    )
+
+    # Use the original photo: drop everything after the first "_" (134393938321887466_f35.png -> 134393938321887466.png)
+    $pattern = '_[^\\/]*(?=\.[^\\/.]+$)'
+
+    try {
+        $body = $json | ConvertFrom-Json -ErrorAction Stop
+
+        if ($null -ne $body.listImages) {
+            foreach ($image in @($body.listImages)) {
+                if ($null -ne $image -and $null -ne $image.fileName) {
+                    $image.fileName = ([string]$image.fileName) -replace $pattern, ''
+                }
+            }
+        }
+
+        # Selfbooth: listImages of each frame in photoPackageDetails
+        if ($null -ne $body.photoPackageDetails) {
+            foreach ($detail in @($body.photoPackageDetails)) {
+                foreach ($image in @($detail.listImages)) {
+                    if ($null -ne $image -and $null -ne $image.fileName) {
+                        $image.fileName = ([string]$image.fileName) -replace $pattern, ''
+                    }
+                }
+            }
+        }
+
+        return ($body | ConvertTo-Json -Depth 20)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "JSON is invalid: $($_.Exception.Message)",
+            "Invalid JSON"
+        )
+        return $json
+    }
+}
+
 function Show-ProcessRetryPopup {
     param(
         [string]$transactionId,
@@ -304,7 +344,7 @@ function Show-ProcessRetryPopup {
     $retryForm.Controls.Add($txtRetryJson)
 
     $btnRemoveF1 = New-Object System.Windows.Forms.Button
-    $btnRemoveF1.Text = "Remove _f1"
+    $btnRemoveF1.Text = "Remove filter"
     $btnRemoveF1.Location = New-Object System.Drawing.Point(15, 625)
     $btnRemoveF1.Size = New-Object System.Drawing.Size(140, 38)
     $retryForm.Controls.Add($btnRemoveF1)
@@ -322,35 +362,7 @@ function Show-ProcessRetryPopup {
     $retryForm.Controls.Add($btnCloseRetry)
 
     $btnRemoveF1.Add_Click({
-        try {
-            $body = $txtRetryJson.Text | ConvertFrom-Json -ErrorAction Stop
-
-            if ($null -ne $body.listImages) {
-                foreach ($image in @($body.listImages)) {
-                    if ($null -ne $image.fileName) {
-                        $image.fileName = ([string]$image.fileName) -replace '_f1(?=\.[^\\/.]+$)', ''
-                    }
-                }
-            }
-
-            # Selfbooth: listImages of each frame in photoPackageDetails
-            if ($null -ne $body.photoPackageDetails) {
-                foreach ($detail in @($body.photoPackageDetails)) {
-                    foreach ($image in @($detail.listImages)) {
-                        if ($null -ne $image -and $null -ne $image.fileName) {
-                            $image.fileName = ([string]$image.fileName) -replace '_f1(?=\.[^\\/.]+$)', ''
-                        }
-                    }
-                }
-            }
-
-            $txtRetryJson.Text = $body | ConvertTo-Json -Depth 20
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show(
-                "JSON is invalid: $($_.Exception.Message)",
-                "Invalid JSON"
-            )
-        }
+        $txtRetryJson.Text = Remove-ImageFilterSuffix -json $txtRetryJson.Text
     })
 
     $btnRetry.Add_Click({
@@ -407,25 +419,63 @@ function Show-ImagePopup {
         [string]$transactionId
     )
 
-    $imagePath = "D:\Work\PhotoBooth\Image\$transactionId\$transactionId.png"
+    # Frame 1 = {id}.png, selfbooth frame n = {id}_n.png
+    $folder = "D:\Work\PhotoBooth\Image\$transactionId"
+    $imagePaths = @()
+    if (Test-Path $folder) {
+        $pattern = "^" + [regex]::Escape($transactionId) + "(?:_(\d+))?\.png$"
+        $imagePaths = @(Get-ChildItem -Path $folder -Filter "*.png" -File |
+            Where-Object { $_.Name -match $pattern } |
+            Sort-Object { if ($_.Name -match $pattern -and $Matches[1]) { [int]$Matches[1] } else { 1 } } |
+            ForEach-Object { $_.FullName })
+    }
 
-    if (-not (Test-Path $imagePath)) {
-        [System.Windows.Forms.MessageBox]::Show("Image not found:`n$imagePath", "Error")
+    if ($imagePaths.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Image not found:`n$folder\$transactionId.png", "Error")
         return
     }
 
     $imgForm = New-Object System.Windows.Forms.Form
-    $imgForm.Text = "Preview - $transactionId"
-    $imgForm.Size = New-Object System.Drawing.Size(600, 600)
+    $imgForm.Text = "Preview - $transactionId ($($imagePaths.Count) image)"
+    $imgForm.Size = New-Object System.Drawing.Size([Math]::Min(1400, 120 + 420 * $imagePaths.Count), 700)
     $imgForm.StartPosition = "CenterParent"
     $imgForm.TopMost = $true
 
-    $pictureBox = New-Object System.Windows.Forms.PictureBox
-    $pictureBox.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
-    $pictureBox.Image = [System.Drawing.Image]::FromFile($imagePath)
+    $panel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $panel.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $panel.AutoScroll = $true
+    $imgForm.Controls.Add($panel)
 
-    $imgForm.Controls.Add($pictureBox)
+    foreach ($imagePath in $imagePaths) {
+        $box = New-Object System.Windows.Forms.Panel
+        $box.Size = New-Object System.Drawing.Size(400, 620)
+
+        $pictureBox = New-Object System.Windows.Forms.PictureBox
+        $pictureBox.Location = New-Object System.Drawing.Point(0, 0)
+        $pictureBox.Size = New-Object System.Drawing.Size(400, 585)
+        $pictureBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+
+        # Load a copy so the file is not locked while the popup is open
+        $stream = [System.IO.File]::OpenRead($imagePath)
+        try {
+            $img = [System.Drawing.Image]::FromStream($stream)
+            $pictureBox.Image = New-Object System.Drawing.Bitmap($img)
+            $img.Dispose()
+        } finally {
+            $stream.Close()
+        }
+        $box.Controls.Add($pictureBox)
+
+        $lblName = New-Object System.Windows.Forms.Label
+        $lblName.Text = [System.IO.Path]::GetFileName($imagePath)
+        $lblName.Location = New-Object System.Drawing.Point(0, 590)
+        $lblName.Size = New-Object System.Drawing.Size(400, 25)
+        $lblName.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $box.Controls.Add($lblName)
+
+        $panel.Controls.Add($box)
+    }
+
     [void]$imgForm.ShowDialog()
 }
 
@@ -746,7 +796,8 @@ SELECT IFNULL(p.PhotoPackageId, 0) AS PhotoPackageId, IFNULL(p.LayoutId, 0) AS L
        IFNULL(p.ThemeId, 0) AS ThemeId, IFNULL(p.NumberOfPrint, 0) AS NumberOfPrint,
        IFNULL(l.FrameId, 0) AS FrameId, IFNULL(l.Code, '') AS Code,
        IFNULL(l.Width, 0) AS Width, IFNULL(l.Height, 0) AS Height,
-       (SELECT lt.Id FROM LayoutThemes lt WHERE lt.LayoutId = p.LayoutId AND lt.ThemeId = p.ThemeId LIMIT 1) AS ThemeDetailId
+       (SELECT lt.Id FROM LayoutThemes lt WHERE lt.LayoutId = p.LayoutId AND lt.ThemeId = p.ThemeId LIMIT 1) AS ThemeDetailId,
+       (SELECT COUNT(*) FROM LayoutPictures lp WHERE lp.LayoutId = p.LayoutId) AS PictureCount
 FROM TransactionPhotoPackageLayoutThemes p
 LEFT JOIN Layouts l ON l.Id = p.LayoutId
 WHERE p.TransactionId = @id
@@ -767,6 +818,7 @@ ORDER BY p.Id
             Width = $width
             Height = $height
             ThemeDetailId = if ($reader["ThemeDetailId"] -ne [DBNull]::Value) { [int]$reader["ThemeDetailId"] } else { 0 }
+            PictureCount = [int]$reader["PictureCount"]
             Is2x6 = ([int]$reader["FrameId"] -eq 1)
             Landscape = ($width -gt $height)
             Files = New-Object System.Collections.ArrayList
@@ -881,7 +933,7 @@ function Get-SelfBoothFramesText {
     foreach ($frame in $frames) {
         $type = if ($frame.Row.Is2x6) { "2x6" } else { "4x6" }
         $file = if ($frame.FileName) { $frame.FileName } else { "(not generated yet)" }
-        $lines += "#$($frame.Index + 1) index=$($frame.Index) | $type | layout $($frame.Row.LayoutId) $($frame.Row.Code) | theme $($frame.Row.ThemeId) | print $($frame.NumberOfPrint) | $file"
+        $lines += "#$($frame.Index + 1) index=$($frame.Index) | $type | layout $($frame.Row.LayoutId) $($frame.Row.Code) | $($frame.Row.PictureCount) photos | theme $($frame.Row.ThemeId) | print $($frame.NumberOfPrint) | $file"
     }
 
     $lines += ""
@@ -913,13 +965,76 @@ function Get-SelfBoothProcessJson {
     $listImages = @($body.listImages)
     $listSticker = @($body.listSticker)
 
-    # DB only keeps listImages of frame 1 (Transactions.Images), so every frame starts with that list.
-    # Check / edit listImages of each frame before sending.
+    # DB only keeps listImages of frame 1 (Transactions.Images).
+    # Other frames: fill up to the number of photos of the layout with raw photos not used yet,
+    # then repeat the photos of frame 1. Check / edit listImages of each frame before sending.
+    $folder = "D:\Work\PhotoBooth\Image\$transactionId"
+    $filterSuffix = ""
+    if ($listImages.Count -gt 0 -and [string]$listImages[0].fileName -match '^[^_\\/]+(_[^\\/]*)\.[^\\/.]+$') {
+        $filterSuffix = $Matches[1]
+    }
+
+    $usedPhotos = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($image in $listImages) {
+        [void]$usedPhotos.Add((([string]$image.fileName) -replace '_[^\\/]*(?=\.[^\\/.]+$)', ''))
+    }
+
+    $rawPhotos = @()
+    if (Test-Path $folder) {
+        $rawPhotos = @(Get-ChildItem -Path $folder -File |
+            Where-Object { $_.Name -match '^\d+\.(png|jpg|jpeg)$' } |
+            Sort-Object Name |
+            ForEach-Object { $_.Name })
+    }
+
     $details = @()
     $first = $true
     foreach ($frame in $frames) {
         if ($frame.NumberOfPrint -le 0) {
             continue
+        }
+
+        $need = $frame.Row.PictureCount
+        if ($need -le 0) {
+            $need = $listImages.Count
+        }
+
+        $frameImages = @()
+        if ($first) {
+            $frameImages = @($listImages)
+        } else {
+            foreach ($photo in $rawPhotos) {
+                if ($frameImages.Count -ge $need) {
+                    break
+                }
+                if ($usedPhotos.Contains($photo)) {
+                    continue
+                }
+
+                [void]$usedPhotos.Add($photo)
+                $fileName = $photo
+                if ($filterSuffix) {
+                    $filtered = [System.IO.Path]::GetFileNameWithoutExtension($photo) + $filterSuffix + [System.IO.Path]::GetExtension($photo)
+                    if (Test-Path (Join-Path $folder $filtered)) {
+                        $fileName = $filtered
+                    }
+                }
+
+                $frameImages += [ordered]@{
+                    fileName = $fileName
+                    rotate = 0.0
+                    flip = 0
+                    isDigitalBackground = $false
+                    digitalBackgroundId = 0
+                }
+            }
+        }
+
+        # Not enough photos: repeat the photos of frame 1
+        $i = 0
+        while ($frameImages.Count -lt $need -and $listImages.Count -gt 0) {
+            $frameImages += $listImages[$i % $listImages.Count]
+            $i++
         }
 
         # Stickers are only stored for frame 1; ProcessImage always sends [] (same as the old flow)
@@ -936,7 +1051,7 @@ function Get-SelfBoothProcessJson {
             NumberOfPrint = $frame.NumberOfPrint
             themeDetailId = $frame.Row.ThemeDetailId
             filterId = $body.filterId
-            listImages = $listImages
+            listImages = $frameImages
             listSticker = $detailStickers
         }
         $first = $false
@@ -1055,7 +1170,7 @@ function Show-SelfBoothJsonPopup {
     if ($mode -eq "Print") {
         $lblHint.Text = "Check numberOfPrint of each frame. 2 strips of the same 2x6 layout are printed on 1 sheet (numberOfPrint of the first strip = number of sheets)."
     } else {
-        $lblHint.Text = "DB only stores the photos of frame 1, so every frame uses that list. Edit listImages of each frame in photoPackageDetails (raw photos are listed on the right) before sending."
+        $lblHint.Text = "DB only stores the photos of frame 1. Other frames are filled with unused raw photos, then the photos of frame 1, up to the number of photos of the layout. Edit listImages of each frame if needed (raw photos are listed on the right)."
     }
     $sbForm.Controls.Add($lblHint)
 
@@ -1080,6 +1195,18 @@ function Show-SelfBoothJsonPopup {
     $txtSbInfo.Font = New-Object System.Drawing.Font("Consolas", 9)
     $txtSbInfo.Text = $infoText
     $sbForm.Controls.Add($txtSbInfo)
+
+    if ($mode -ne "Print") {
+        $btnSbRemoveFilter = New-Object System.Windows.Forms.Button
+        $btnSbRemoveFilter.Text = "Remove filter"
+        $btnSbRemoveFilter.Location = New-Object System.Drawing.Point(15, 665)
+        $btnSbRemoveFilter.Size = New-Object System.Drawing.Size(140, 38)
+        $sbForm.Controls.Add($btnSbRemoveFilter)
+
+        $btnSbRemoveFilter.Add_Click({
+            $txtSbJson.Text = Remove-ImageFilterSuffix -json $txtSbJson.Text
+        })
+    }
 
     $btnSbSend = New-Object System.Windows.Forms.Button
     $btnSbSend.Text = "Send"
